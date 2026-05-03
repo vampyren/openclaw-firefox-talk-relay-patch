@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# OpenClaw Firefox Start Talk gateway-relay patch (hardened v2)
+# OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.1)
 #
 # Purpose:
 #   1. Force OpenAI Web UI Start Talk through gateway-relay instead of browser-direct WebRTC SDP.
@@ -10,6 +10,11 @@ set -euo pipefail
 #      audio is playing. Gate threshold is configurable at runtime via
 #      localStorage["openclaw.micGateMs"]  (milliseconds, default 150).
 #   4. Optionally set up OPENAI_API_KEY securely for OpenClaw SecretRef/env usage.
+#
+# Changes in v2.1:
+#   - Key is passed to Python via file descriptor 3 instead of an env var,
+#     so it is no longer visible in /proc/<pid>/environ during the python process.
+#   - Reject extra positional arguments (e.g. "./script.sh --setup-openai-key garbage").
 #
 # Tested against: OpenClaw 2026.5.2
 #
@@ -27,6 +32,11 @@ set -euo pipefail
 MODE="${1:-apply}"
 ARG2="${2:-}"
 
+if (( $# > 2 )); then
+    echo "ERROR: too many arguments. Run with --help for usage." >&2
+    exit 1
+fi
+
 DEFAULT_ROOT="$HOME/.npm-global/lib/node_modules/openclaw"
 BACKUP_BASE="$HOME/temp/openclaw-firefox-talk-patch-backups"
 KEEP_BACKUPS="${KEEP_BACKUPS:-10}"
@@ -40,7 +50,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 print_help() {
     cat <<EOF
-OpenClaw Firefox Start Talk gateway-relay patch (hardened v2)
+OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.1)
 
 Usage:
   $(basename "$0")                       Apply the patch.
@@ -164,16 +174,24 @@ setup_openai_key() {
         echo "WARNING: key does not start with sk- or sk-proj-. Continuing because OpenAI key formats can change." >&2
     fi
 
-    # Pass the key via env var (NOT argv) -- argv is visible in `ps` to other local users.
-    OPENCLAW_KEY_INPUT="$key" python3 - "$env_file" <<'PY'
-import os, sys
+    # Pass the key via file descriptor 3 (NOT argv, NOT env var):
+    #   - argv would expose the key to `ps` for any local user.
+    #   - env vars are visible in /proc/<pid>/environ to the same UID and root
+    #     for the lifetime of the python process.
+    #   - fd-3 here-string lives only in the kernel pipe buffer for this single
+    #     python invocation, then disappears.
+    python3 - "$env_file" 3<<<"$key" <<'PY'
+import sys
 from pathlib import Path
 
-key = os.environ.pop('OPENCLAW_KEY_INPUT', '')
+env_file = Path(sys.argv[1])
+
+with open(3, 'r', encoding='utf-8') as fd:
+    key = fd.read().rstrip('\n')
+
 if not key:
     sys.exit('ERROR: key not received from caller')
 
-env_file = Path(sys.argv[1])
 lines = env_file.read_text().splitlines() if env_file.exists() else []
 
 out = []
@@ -390,9 +408,11 @@ PY
 # ---------------------------------------------------------------------------
 case "$MODE" in
     apply)
+        [[ -z "$ARG2" ]] || die "apply mode does not accept extra arguments. Run with --help for usage."
         apply_patch
         ;;
     --setup-openai-key)
+        [[ -z "$ARG2" ]] || die "--setup-openai-key does not accept extra arguments."
         setup_openai_key
         ;;
     --rollback)
@@ -410,6 +430,7 @@ case "$MODE" in
         fi
         ;;
     --help|-h)
+        [[ -z "$ARG2" ]] || die "--help does not accept extra arguments."
         print_help
         ;;
     *)

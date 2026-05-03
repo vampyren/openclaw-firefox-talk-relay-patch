@@ -158,7 +158,7 @@ It will:
   openclaw config validate
   ```
 
-The key is passed from the script to Python via an environment variable (not argv), so it is not visible in `ps`. The key is never echoed to logs. Do not commit `.env` or paste keys into chat/logs/screenshots.
+The key is passed from the script to Python via file descriptor 3 (a here-string), not via argv and not via an environment variable. This means the key is not visible in `ps` (argv) and not visible in `/proc/<pid>/environ` (env vars) during the python process's lifetime. The key is never echoed to logs. Do not commit `.env` or paste keys into chat/logs/screenshots.
 
 If the post-write `openclaw config` step fails, the script reports clearly that the key file is in place and prints the exact commands to run manually once the gateway is reachable.
 
@@ -343,7 +343,7 @@ openclaw gateway restart
 This patch does not log or expose API keys.
 
 * The optional key helper stores the API key in `~/.openclaw/.env` with file mode `600` and `~/.openclaw` set to `700`.
-* The key is passed from the shell script to Python via an environment variable (not argv), so it does not appear in `ps` output.
+* The key is passed from the shell script to Python via file descriptor 3 (a here-string). This means it is **not** visible in `ps` (argv) and **not** visible in `/proc/<pid>/environ` (env vars) during the python process's lifetime — it lives only in the kernel pipe buffer for that single invocation, then disappears.
 * In browser DevTools, an OpenAI realtime token starting with `ek_` / `ek-` is **ephemeral** and short-lived — that's expected. If you ever see a real `sk-…` or `sk-proj-…` key in the browser, **rotate it immediately** at <https://platform.openai.com/api-keys>.
 * Do not screenshot or paste real tokens.
 
