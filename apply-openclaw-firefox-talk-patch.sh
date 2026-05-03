@@ -7,12 +7,14 @@ set -euo pipefail
 #   1. Force OpenAI Web UI Start Talk through gateway-relay instead of browser-direct WebRTC SDP.
 #   2. Allow the pushed talk.realtime.relay event through OpenClaw's event scope guard.
 #   3. Add half-duplex mic gating so the browser does not send mic audio while assistant audio is playing.
+#   4. Optionally set up OPENAI_API_KEY securely for OpenClaw SecretRef/env usage.
 #
 # Tested against:
 #   OpenClaw 2026.5.2
 #
 # Usage:
 #   ./apply-openclaw-firefox-talk-patch.sh
+#   ./apply-openclaw-firefox-talk-patch.sh --setup-openai-key
 #   ./apply-openclaw-firefox-talk-patch.sh --rollback latest
 #
 # Optional override:
@@ -37,6 +39,73 @@ fi
 DIST="$ROOT/dist"
 BACKUP_BASE="$HOME/temp/openclaw-firefox-talk-patch-backups"
 mkdir -p "$BACKUP_BASE"
+
+setup_openai_key() {
+  local env_dir env_file backup_file key
+  env_dir="$HOME/.openclaw"
+  env_file="$env_dir/.env"
+
+  mkdir -p "$env_dir"
+  chmod 700 "$env_dir"
+
+  if [[ -f "$env_file" ]]; then
+    backup_file="$env_file.bak-$(date +%Y%m%d-%H%M%S)"
+    cp -a "$env_file" "$backup_file"
+    echo "Existing .env backup: $backup_file"
+  fi
+
+  printf 'Paste OpenAI API key. Input is hidden: '
+  IFS= read -r -s key
+  printf '\n'
+
+  if [[ -z "$key" ]]; then
+    echo "ERROR: empty key, aborting." >&2
+    exit 1
+  fi
+
+  if [[ "$key" != sk-* && "$key" != sk-proj-* ]]; then
+    echo "WARNING: key does not start with sk- or sk-proj-. Continuing because OpenAI key formats can change." >&2
+  fi
+
+  python3 - "$env_file" "$key" <<'PY'
+from pathlib import Path
+import sys
+
+env_file = Path(sys.argv[1])
+key = sys.argv[2]
+
+lines = []
+if env_file.exists():
+    lines = env_file.read_text().splitlines()
+
+out = []
+replaced = False
+for line in lines:
+    if line.startswith("OPENAI_API_KEY="):
+        out.append(f"OPENAI_API_KEY={key}")
+        replaced = True
+    else:
+        out.append(line)
+
+if not replaced:
+    out.append(f"OPENAI_API_KEY={key}")
+
+env_file.write_text("\n".join(out).rstrip() + "\n")
+PY
+
+  chmod 600 "$env_file"
+
+  echo "Stored OPENAI_API_KEY in: $env_file"
+  echo "Permissions:"
+  ls -l "$env_file"
+  echo
+  echo "Configuring OpenClaw SecretRef env provider allowlist for OPENAI_API_KEY..."
+  openclaw config set secrets.providers.default --provider-source env --provider-allowlist OPENAI_API_KEY
+  openclaw config validate
+  echo
+  echo "OPENAI_KEY_SETUP_DONE"
+  echo "Restart OpenClaw gateway when ready: openclaw gateway restart"
+}
 
 find_one() {
   local desc="$1"
@@ -68,6 +137,11 @@ rollback_latest() {
   echo "ROLLBACK_OK"
   echo "Restart OpenClaw gateway after rollback: openclaw gateway restart"
 }
+
+if [[ "$MODE" == "--setup-openai-key" ]]; then
+  setup_openai_key
+  exit 0
+fi
 
 if [[ "$MODE" == "--rollback" ]]; then
   if [[ "$ROLLBACK_TARGET" == "latest" || -z "$ROLLBACK_TARGET" ]]; then
@@ -147,6 +221,9 @@ diff -u "$BACKUP_DIR/control-ui-index.js.bak" "$FRONTEND" | sed -n '/onaudioproc
 
 echo
 echo "PATCH_DONE"
+echo
+echo "Optional OpenAI key setup:"
+echo "  $0 --setup-openai-key"
 echo
 echo "Next steps:"
 echo "  openclaw config set talk.provider '\"openai\"' --strict-json"
