@@ -117,6 +117,34 @@ If your install path is different, run with:
 OPENCLAW_ROOT=/path/to/openclaw ./apply-openclaw-firefox-talk-patch.sh
 ```
 
+## Optional: set up OpenAI API key securely
+
+The helper can store `OPENAI_API_KEY` in `~/.openclaw/.env` and configure OpenClaw's env SecretRef provider allowlist.
+
+Run:
+
+```bash
+chmod +x apply-openclaw-firefox-talk-patch.sh
+./apply-openclaw-firefox-talk-patch.sh --setup-openai-key
+```
+
+It will:
+
+- prompt for the OpenAI API key with hidden input
+- create or update `~/.openclaw/.env`
+- back up an existing `.env` before changing it
+- set `~/.openclaw` to `700`
+- set `~/.openclaw/.env` to `600`
+- add/update only the `OPENAI_API_KEY=` line
+- run:
+
+```bash
+openclaw config set secrets.providers.default --provider-source env --provider-allowlist OPENAI_API_KEY
+openclaw config validate
+```
+
+The key is not printed by the script. Do not commit `.env` or paste keys into chat/logs/screenshots.
+
 ## Install patch
 
 ```bash
@@ -149,7 +177,11 @@ openclaw config validate
 openclaw gateway restart
 ```
 
-You still need a working OpenAI API key configured in OpenClaw, for example through SecretRef/env. Do not paste or commit API keys.
+You still need a working OpenAI API key configured in OpenClaw. The recommended helper is:
+
+```bash
+./apply-openclaw-firefox-talk-patch.sh --setup-openai-key
+```
 
 ## Verify backend session
 
@@ -203,6 +235,8 @@ Rollback the latest backup:
 openclaw gateway restart
 ```
 
+Rollback does not remove `~/.openclaw/.env` or undo OpenClaw config changes. It only restores the patched installed bundle files.
+
 ## Notes
 
 - This is a local installed-bundle patch, not an upstream source patch.
@@ -214,5 +248,13 @@ openclaw gateway restart
 ## Security
 
 This patch does not log or expose API keys.
+
+The optional key helper stores the API key in:
+
+```text
+~/.openclaw/.env
+```
+
+with file mode `600`.
 
 Do not screenshot or paste real tokens. In browser DevTools, an OpenAI realtime token starting with `ek_` / `ek-` is ephemeral. If you ever see a real `sk-` or `sk-proj-` key in the browser, rotate it immediately.
