@@ -19,29 +19,127 @@ set -euo pipefail
 #
 # Optional override:
 #   OPENCLAW_ROOT=/path/to/openclaw ./apply-openclaw-firefox-talk-patch.sh
+#   OPENCLAW_ALLOW_UNTESTED=1 ./apply-openclaw-firefox-talk-patch.sh
 
-MODE="${1:-apply}"
-ROLLBACK_TARGET="${2:-}"
+usage() {
+  cat <<'USAGE'
+Usage:
+  ./apply-openclaw-firefox-talk-patch.sh
+  ./apply-openclaw-firefox-talk-patch.sh --setup-openai-key
+  ./apply-openclaw-firefox-talk-patch.sh --rollback latest
 
-DEFAULT_ROOT="$HOME/.npm-global/lib/node_modules/openclaw"
-if [[ -n "${OPENCLAW_ROOT:-}" ]]; then
-  ROOT="$OPENCLAW_ROOT"
-elif [[ -d "$DEFAULT_ROOT" ]]; then
-  ROOT="$DEFAULT_ROOT"
-elif [[ -d "/usr/lib/node_modules/openclaw" ]]; then
-  ROOT="/usr/lib/node_modules/openclaw"
-else
-  echo "ERROR: could not find OpenClaw install root." >&2
-  echo "Set OPENCLAW_ROOT=/path/to/openclaw and retry." >&2
-  exit 1
-fi
+Environment overrides:
+  OPENCLAW_ROOT=/path/to/openclaw
+  OPENCLAW_ALLOW_UNTESTED=1    # bypass OpenClaw 2026.5.2 version guard
+USAGE
+}
 
-DIST="$ROOT/dist"
-BACKUP_BASE="$HOME/temp/openclaw-firefox-talk-patch-backups"
-mkdir -p "$BACKUP_BASE"
+MODE="apply"
+ROLLBACK_TARGET=""
+
+case "${1:-}" in
+  "")
+    MODE="apply"
+    ;;
+  --setup-openai-key)
+    MODE="setup-openai-key"
+    if [[ $# -ne 1 ]]; then
+      usage >&2
+      exit 2
+    fi
+    ;;
+  --rollback)
+    MODE="rollback"
+    ROLLBACK_TARGET="${2:-latest}"
+    if [[ $# -gt 2 ]]; then
+      usage >&2
+      exit 2
+    fi
+    ;;
+  -h|--help)
+    usage
+    exit 0
+    ;;
+  *)
+    echo "ERROR: unknown argument: $1" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
+
+require_cmd() {
+  local cmd="$1"
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "ERROR: required command not found: $cmd" >&2
+    exit 1
+  fi
+}
+
+require_common_tools() {
+  require_cmd bash
+  require_cmd python3
+  require_cmd find
+  require_cmd sed
+  require_cmd diff
+}
+
+resolve_root() {
+  local default_root
+  default_root="$HOME/.npm-global/lib/node_modules/openclaw"
+
+  if [[ -n "${OPENCLAW_ROOT:-}" ]]; then
+    ROOT="$OPENCLAW_ROOT"
+  elif [[ -d "$default_root" ]]; then
+    ROOT="$default_root"
+  elif [[ -d "/usr/lib/node_modules/openclaw" ]]; then
+    ROOT="/usr/lib/node_modules/openclaw"
+  else
+    echo "ERROR: could not find OpenClaw install root." >&2
+    echo "Set OPENCLAW_ROOT=/path/to/openclaw and retry." >&2
+    exit 1
+  fi
+
+  if [[ ! -d "$ROOT/dist" ]]; then
+    echo "ERROR: OpenClaw root does not contain dist/: $ROOT" >&2
+    exit 1
+  fi
+
+  DIST="$ROOT/dist"
+}
+
+check_openclaw_cli() {
+  require_cmd openclaw
+}
+
+check_openclaw_version() {
+  local version_output
+  version_output="$(openclaw --version 2>/dev/null || true)"
+  if [[ -z "$version_output" ]]; then
+    echo "WARNING: could not read OpenClaw version with: openclaw --version" >&2
+    return 0
+  fi
+
+  if [[ "$version_output" != *"2026.5.2"* ]]; then
+    cat >&2 <<EOF_VERSION
+ERROR: this patch was tested against OpenClaw 2026.5.2.
+Detected:
+$version_output
+
+Refusing to patch untested OpenClaw build.
+Set OPENCLAW_ALLOW_UNTESTED=1 to bypass this guard and rely on exact source-anchor validation.
+EOF_VERSION
+    if [[ "${OPENCLAW_ALLOW_UNTESTED:-}" != "1" ]]; then
+      exit 1
+    fi
+    echo "OPENCLAW_ALLOW_UNTESTED=1 set, continuing despite version mismatch." >&2
+  fi
+}
 
 setup_openai_key() {
-  local env_dir env_file backup_file key
+  require_common_tools
+  check_openclaw_cli
+
+  local env_dir env_file backup_file key py_script
   env_dir="$HOME/.openclaw"
   env_file="$env_dir/.env"
 
@@ -67,12 +165,19 @@ setup_openai_key() {
     echo "WARNING: key does not start with sk- or sk-proj-. Continuing because OpenAI key formats can change." >&2
   fi
 
-  python3 - "$env_file" "$key" <<'PY'
+  py_script="$(mktemp)"
+  chmod 700 "$py_script"
+  trap 'rm -f "$py_script"' RETURN
+
+  cat > "$py_script" <<'PY'
 from pathlib import Path
 import sys
 
 env_file = Path(sys.argv[1])
-key = sys.argv[2]
+key = sys.stdin.read().rstrip("\n")
+
+if not key:
+    raise SystemExit("empty key on stdin")
 
 lines = []
 if env_file.exists():
@@ -93,6 +198,11 @@ if not replaced:
 env_file.write_text("\n".join(out).rstrip() + "\n")
 PY
 
+  printf '%s' "$key" | python3 "$py_script" "$env_file"
+  unset key
+  rm -f "$py_script"
+  trap - RETURN
+
   chmod 600 "$env_file"
 
   echo "Stored OPENAI_API_KEY in: $env_file"
@@ -100,8 +210,34 @@ PY
   ls -l "$env_file"
   echo
   echo "Configuring OpenClaw SecretRef env provider allowlist for OPENAI_API_KEY..."
+
+  if ! openclaw config set secrets.providers.default --provider-source env --provider-allowlist OPENAI_API_KEY; then
+    cat >&2 <<'EOF_CONFIG'
+
+KEY_STORED_BUT_CONFIG_UPDATE_FAILED
+The key was stored successfully, but OpenClaw config update failed.
+Make sure the OpenClaw gateway is installed/running, then run:
+
   openclaw config set secrets.providers.default --provider-source env --provider-allowlist OPENAI_API_KEY
   openclaw config validate
+  openclaw gateway restart
+EOF_CONFIG
+    exit 1
+  fi
+
+  if ! openclaw config validate; then
+    cat >&2 <<'EOF_VALIDATE'
+
+KEY_STORED_BUT_CONFIG_VALIDATE_FAILED
+The key was stored and the SecretRef provider command ran, but config validation failed.
+Check OpenClaw config, then run:
+
+  openclaw config validate
+  openclaw gateway restart
+EOF_VALIDATE
+    exit 1
+  fi
+
   echo
   echo "OPENAI_KEY_SETUP_DONE"
   echo "Restart OpenClaw gateway when ready: openclaw gateway restart"
@@ -119,9 +255,22 @@ find_one() {
   printf '%s\n' "${matches[0]}"
 }
 
-SERVER_METHODS="$(find_one 'server-methods bundle' "$DIST" -maxdepth 1 -type f -name 'server-methods-*.js')"
-SERVER_IMPL="$(find_one 'server.impl bundle' "$DIST" -maxdepth 1 -type f -name 'server.impl-*.js')"
-FRONTEND="$(find_one 'control-ui index bundle' "$DIST/control-ui/assets" -maxdepth 1 -type f -name 'index-*.js')"
+discover_bundles() {
+  SERVER_METHODS="$(find_one 'server-methods bundle' "$DIST" -maxdepth 1 -type f -name 'server-methods-*.js')"
+  SERVER_IMPL="$(find_one 'server.impl bundle' "$DIST" -maxdepth 1 -type f -name 'server.impl-*.js')"
+  FRONTEND="$(find_one 'control-ui index bundle' "$DIST/control-ui/assets" -maxdepth 1 -type f -name 'index-*.js')"
+}
+
+check_writable() {
+  local f
+  for f in "$SERVER_METHODS" "$SERVER_IMPL" "$FRONTEND"; do
+    if [[ ! -w "$f" ]]; then
+      echo "ERROR: file is not writable by current user: $f" >&2
+      echo "Run as the user that installed OpenClaw, fix ownership, or use sudo if this is a root-owned install." >&2
+      exit 1
+    fi
+  done
+}
 
 rollback_latest() {
   local latest
@@ -138,29 +287,21 @@ rollback_latest() {
   echo "Restart OpenClaw gateway after rollback: openclaw gateway restart"
 }
 
-if [[ "$MODE" == "--setup-openai-key" ]]; then
-  setup_openai_key
-  exit 0
-fi
+apply_patch() {
+  check_openclaw_cli
+  check_openclaw_version
+  check_writable
 
-if [[ "$MODE" == "--rollback" ]]; then
-  if [[ "$ROLLBACK_TARGET" == "latest" || -z "$ROLLBACK_TARGET" ]]; then
-    rollback_latest
-    exit 0
-  fi
-  echo "ERROR: only --rollback latest is supported by this helper." >&2
-  exit 1
-fi
+  local ts backup_dir
+  ts="$(date +%Y%m%d-%H%M%S)"
+  backup_dir="$BACKUP_BASE/backup-$ts"
+  mkdir -p "$backup_dir"
 
-TS="$(date +%Y%m%d-%H%M%S)"
-BACKUP_DIR="$BACKUP_BASE/backup-$TS"
-mkdir -p "$BACKUP_DIR"
+  cp -a "$SERVER_METHODS" "$backup_dir/server-methods.js.bak"
+  cp -a "$SERVER_IMPL" "$backup_dir/server.impl.js.bak"
+  cp -a "$FRONTEND" "$backup_dir/control-ui-index.js.bak"
 
-cp -a "$SERVER_METHODS" "$BACKUP_DIR/server-methods.js.bak"
-cp -a "$SERVER_IMPL" "$BACKUP_DIR/server.impl.js.bak"
-cp -a "$FRONTEND" "$BACKUP_DIR/control-ui-index.js.bak"
-
-python3 - "$SERVER_METHODS" "$SERVER_IMPL" "$FRONTEND" <<'PY'
+  python3 - "$SERVER_METHODS" "$SERVER_IMPL" "$FRONTEND" <<'PY'
 from pathlib import Path
 import sys
 
@@ -189,53 +330,95 @@ patches = [
     ),
 ]
 
+texts = {path: path.read_text() for path, _, _, _ in patches}
+planned = []
+
 for path, old, new, label in patches:
-    text = path.read_text()
+    text = texts[path]
     if new in text:
         print(f'SKIP already patched: {label}')
+        planned.append((path, text))
         continue
     count = text.count(old)
     if count != 1:
         raise SystemExit(f'ABORT: {label}: expected exactly 1 match in {path}, found {count}')
-    path.write_text(text.replace(old, new, 1))
-    print(f'PATCH_OK: {label}')
+    planned.append((path, text.replace(old, new, 1)))
+
+for path, new_text in planned:
+    path.write_text(new_text)
+
+for path, old, new, label in patches:
+    if new in path.read_text():
+        if old in texts[path]:
+            print(f'PATCH_OK: {label}')
 PY
 
-echo
-echo "OpenClaw root: $ROOT"
-echo "Backup dir: $BACKUP_DIR"
-echo
-echo "Changed files:"
-echo "  $SERVER_METHODS"
-echo "  $SERVER_IMPL"
-echo "  $FRONTEND"
-echo
-echo "Diff summary:"
-echo
+  echo
+  echo "OpenClaw root: $ROOT"
+  echo "Backup dir: $backup_dir"
+  echo
+  echo "Changed files:"
+  echo "  $SERVER_METHODS"
+  echo "  $SERVER_IMPL"
+  echo "  $FRONTEND"
+  echo
+  echo "Diff summary:"
+  echo
 
-diff -u "$BACKUP_DIR/server-methods.js.bak" "$SERVER_METHODS" | sed -n '1,80p' || true
-echo
-diff -u "$BACKUP_DIR/server.impl.js.bak" "$SERVER_IMPL" | sed -n '1,80p' || true
-echo
-diff -u "$BACKUP_DIR/control-ui-index.js.bak" "$FRONTEND" | sed -n '/onaudioprocess/,+8p' || true
+  diff -u "$backup_dir/server-methods.js.bak" "$SERVER_METHODS" | sed -n '1,80p' || true
+  echo
+  diff -u "$backup_dir/server.impl.js.bak" "$SERVER_IMPL" | sed -n '1,80p' || true
+  echo
+  diff -u "$backup_dir/control-ui-index.js.bak" "$FRONTEND" | sed -n '/onaudioprocess/,+8p' || true
 
-echo
-echo "PATCH_DONE"
-echo
-echo "Optional OpenAI key setup:"
-echo "  $0 --setup-openai-key"
-echo
-echo "Next steps:"
-echo "  openclaw config set talk.provider '\"openai\"' --strict-json"
-echo "  openclaw config set talk.providers.openai.model '\"gpt-realtime-1.5\"' --strict-json"
-echo "  openclaw config set talk.providers.openai.modelId '\"gpt-realtime-1.5\"' --strict-json"
-echo "  openclaw config set talk.providers.openai.voice '\"marin\"' --strict-json"
-echo "  openclaw config set talk.providers.openai.voiceId '\"marin\"' --strict-json"
-echo "  openclaw config set talk.providers.openai.vadThreshold '0.85' --strict-json"
-echo "  openclaw config set talk.providers.openai.silenceDurationMs '1000' --strict-json"
-echo "  openclaw config set talk.providers.openai.prefixPaddingMs '100' --strict-json"
-echo "  openclaw config validate"
-echo "  openclaw gateway restart"
-echo
-echo "Rollback latest backup:"
-echo "  $0 --rollback latest"
+  echo
+  echo "PATCH_DONE"
+  echo
+  echo "Optional OpenAI key setup:"
+  echo "  $0 --setup-openai-key"
+  echo
+  echo "Next steps:"
+  echo "  openclaw config set talk.provider '\"openai\"' --strict-json"
+  echo "  openclaw config set talk.providers.openai.model '\"gpt-realtime-1.5\"' --strict-json"
+  echo "  openclaw config set talk.providers.openai.modelId '\"gpt-realtime-1.5\"' --strict-json"
+  echo "  openclaw config set talk.providers.openai.voice '\"marin\"' --strict-json"
+  echo "  openclaw config set talk.providers.openai.voiceId '\"marin\"' --strict-json"
+  echo "  openclaw config set talk.providers.openai.vadThreshold '0.85' --strict-json"
+  echo "  openclaw config set talk.providers.openai.silenceDurationMs '1000' --strict-json"
+  echo "  openclaw config set talk.providers.openai.prefixPaddingMs '100' --strict-json"
+  echo "  openclaw config validate"
+  echo "  openclaw gateway restart"
+  echo
+  echo "Rollback latest backup:"
+  echo "  $0 --rollback latest"
+}
+
+require_common_tools
+
+BACKUP_BASE="$HOME/temp/openclaw-firefox-talk-patch-backups"
+mkdir -p "$BACKUP_BASE"
+
+case "$MODE" in
+  setup-openai-key)
+    setup_openai_key
+    ;;
+  apply)
+    resolve_root
+    discover_bundles
+    apply_patch
+    ;;
+  rollback)
+    resolve_root
+    discover_bundles
+    if [[ "$ROLLBACK_TARGET" == "latest" || -z "$ROLLBACK_TARGET" ]]; then
+      rollback_latest
+    else
+      echo "ERROR: only --rollback latest is supported by this helper." >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "ERROR: internal mode bug: $MODE" >&2
+    exit 2
+    ;;
+esac
