@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.7.3)
+# OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.7.4)
 #
 # Purpose:
 #   1. Force OpenAI Web UI Start Talk through gateway-relay instead of browser-direct WebRTC SDP.
@@ -13,6 +13,15 @@ set -euo pipefail
 #      feedback can defeat any automatic gate). Mute state persists across reloads in
 #      localStorage["openclaw.micMuted"].
 #   5. Optionally set up OPENAI_API_KEY securely for OpenClaw SecretRef/env usage.
+#
+# Changes in v2.7.4:
+#   - The patch now also bumps OpenClaw's SW cache name (dist/control-ui/sw.js).
+#     OpenClaw's SW is cache-first for /assets/*.js with a static cache name, so
+#     once a bundle URL is cached the SW served the old version forever -- our
+#     patches never reached the browser without a manual SW unregister. With the
+#     cache name bumped, the SW's existing activate-handler cleanup deletes the
+#     stale cache on next page load and the patched bundle is served cleanly.
+#     Patch target #4. JS validation, backup, and rollback all extended to sw.js.
 #
 # Changes in v2.7.3:
 #   - Mute button now hides on non-chat pages (Agents, Channels, etc.) instead of
@@ -141,7 +150,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 print_help() {
     cat <<EOF
-OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.7.3)
+OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.7.4)
 
 Usage:
   $(basename "$0")                       Apply the patch.
@@ -191,7 +200,7 @@ preflight_apply() {
     resolve_root
     find_bundles
     local f
-    for f in "$SERVER_METHODS" "$SERVER_IMPL" "$FRONTEND"; do
+    for f in "$SERVER_METHODS" "$SERVER_IMPL" "$FRONTEND" "$SW_BUNDLE"; do
         [[ -w "$f" ]] || die "no write permission on $f. Run with sudo or fix ownership."
     done
 }
@@ -214,6 +223,7 @@ find_bundles() {
     SERVER_METHODS="$(find_one 'server-methods bundle' "$DIST" -maxdepth 1 -type f -name 'server-methods-*.js' -not -name 'server-methods-list-*.js')"
     SERVER_IMPL="$(find_one 'server.impl bundle' "$DIST" -maxdepth 1 -type f -name 'server.impl-*.js')"
     FRONTEND="$(find_one 'control-ui index bundle' "$DIST/control-ui/assets" -maxdepth 1 -type f -name 'index-*.js')"
+    SW_BUNDLE="$(find_one 'control-ui service worker' "$DIST/control-ui" -maxdepth 1 -type f -name 'sw.js')"
 }
 
 prune_backups() {
@@ -346,6 +356,12 @@ rollback_latest() {
     cp -a "$latest/server-methods.js.bak"   "$SERVER_METHODS"
     cp -a "$latest/server.impl.js.bak"      "$SERVER_IMPL"
     cp -a "$latest/control-ui-index.js.bak" "$FRONTEND"
+    # sw.js.bak only present in v2.7.4+ backups; skip silently for older ones.
+    if [[ -f "$latest/sw.js.bak" ]]; then
+        cp -a "$latest/sw.js.bak"           "$SW_BUNDLE"
+    else
+        echo "Note: backup pre-dates v2.7.4 (no sw.js.bak); SW cache name not rolled back." >&2
+    fi
 
     echo "ROLLBACK_OK"
     echo "Restart OpenClaw gateway after rollback: openclaw gateway restart"
@@ -370,9 +386,10 @@ apply_patch() {
         cp -a "$SERVER_METHODS" "$BACKUP_DIR/server-methods.js.bak"
         cp -a "$SERVER_IMPL"    "$BACKUP_DIR/server.impl.js.bak"
         cp -a "$FRONTEND"       "$BACKUP_DIR/control-ui-index.js.bak"
+        cp -a "$SW_BUNDLE"      "$BACKUP_DIR/sw.js.bak"
     fi
 
-    OPENCLAW_PATCH_DRY_RUN="$DRY_RUN" python3 - "$SERVER_METHODS" "$SERVER_IMPL" "$FRONTEND" <<'PY'
+    OPENCLAW_PATCH_DRY_RUN="$DRY_RUN" python3 - "$SERVER_METHODS" "$SERVER_IMPL" "$FRONTEND" "$SW_BUNDLE" <<'PY'
 import os, re, sys
 from pathlib import Path
 
@@ -384,6 +401,7 @@ def _ok(msg):
 server_methods = Path(sys.argv[1])
 server_impl    = Path(sys.argv[2])
 frontend       = Path(sys.argv[3])
+sw_bundle      = Path(sys.argv[4])
 
 # ---- Patch 1: server-methods (literal, semantically-stable anchor) ----
 SM_OLD = 'if (resolution.provider.createBrowserSession) {'
@@ -559,6 +577,37 @@ def patch_literal(path, old, new, label):
         path.write_text(text.replace(old, new, 1))
     _ok(label)
 
+# ---- Patch 4 (v2.7.4): bump SW cache name to invalidate stale assets ----
+# OpenClaw's SW (dist/control-ui/sw.js) is cache-first for /assets/*.js with a
+# static cache name ("openclaw-control-v1"). Once an asset URL is cached, it's
+# served forever -- our patched bundle never reaches the browser unless the user
+# manually unregisters the SW. Bumping CACHE_NAME triggers the SW's existing
+# activate-handler cache cleanup (any cache name that doesn't match the current
+# CACHE_NAME is deleted), so the new name fills cache-first from network on the
+# next page load and the patched bundle is served cleanly.
+#
+# The replacement suffix ("-mute-v28") is tied to the IIFE marker version, so
+# future IIFE bumps automatically also bump this cache name without a separate
+# change required here.
+SW_PATTERN = re.compile(r'const CACHE_NAME = "openclaw-control-v1[^"]*";')
+SW_REPL    = 'const CACHE_NAME = "openclaw-control-v1-mute-v28";'
+SW_MARKER  = 'openclaw-control-v1-mute-v28'   # presence -> already patched
+
+def patch_sw(path):
+    text = path.read_text()
+    label = 'bump SW cache name so re-applied patches actually reach the browser (v2.7.4)'
+    if SW_MARKER in text:
+        print(f'SKIP already patched: {label}')
+        return
+    matches = SW_PATTERN.findall(text)
+    if len(matches) != 1:
+        sys.exit(
+            f'ABORT: {label}: expected exactly 1 regex match in {path.name}, found {len(matches)}'
+        )
+    if not DRY_RUN:
+        path.write_text(SW_PATTERN.sub(SW_REPL, text, count=1))
+    _ok(label)
+
 def patch_frontend(path):
     text = path.read_text()
     changed = False
@@ -635,6 +684,7 @@ patch_literal(server_methods, SM_OLD, SM_NEW,
 patch_literal(server_impl,    SI_OLD, SI_NEW,
               'allow talk.realtime.relay event through EVENT_SCOPE_GUARDS')
 patch_frontend(frontend)
+patch_sw(sw_bundle)
 PY
     local PY_RC=$?
     if (( PY_RC != 0 )); then
@@ -655,7 +705,8 @@ PY
         for pair in \
             "$SERVER_METHODS:server-methods.js.bak" \
             "$SERVER_IMPL:server.impl.js.bak" \
-            "$FRONTEND:control-ui-index.js.bak"
+            "$FRONTEND:control-ui-index.js.bak" \
+            "$SW_BUNDLE:sw.js.bak"
         do
             local path="${pair%%:*}"
             if ! node --check "$path" >/dev/null 2>&1; then
@@ -669,9 +720,10 @@ PY
             cp -a "$BACKUP_DIR/server-methods.js.bak"   "$SERVER_METHODS"
             cp -a "$BACKUP_DIR/server.impl.js.bak"      "$SERVER_IMPL"
             cp -a "$BACKUP_DIR/control-ui-index.js.bak" "$FRONTEND"
+            cp -a "$BACKUP_DIR/sw.js.bak"               "$SW_BUNDLE"
             die "patched file did not parse cleanly. Backups restored. No further changes made."
         fi
-        echo "JS validation passed (node --check on all 3 bundles)."
+        echo "JS validation passed (node --check on all 4 bundles)."
     else
         echo "WARNING: 'node' not on PATH; skipping post-write JS validation." >&2
     fi
@@ -684,6 +736,7 @@ PY
     echo "  $SERVER_METHODS"
     echo "  $SERVER_IMPL"
     echo "  $FRONTEND"
+    echo "  $SW_BUNDLE"
     echo
     echo "Diff summary:"
     echo
@@ -692,6 +745,8 @@ PY
     diff -u "$BACKUP_DIR/server.impl.js.bak"    "$SERVER_IMPL"    | sed -n '1,80p' || true
     echo
     diff -u "$BACKUP_DIR/control-ui-index.js.bak" "$FRONTEND" | sed -n '/onaudioprocess/,+8p' || true
+    echo
+    diff -u "$BACKUP_DIR/sw.js.bak" "$SW_BUNDLE" | sed -n '/CACHE_NAME/,+1p' || true
     echo
 
     prune_backups "$KEEP_BACKUPS" || \
