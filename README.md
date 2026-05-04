@@ -111,20 +111,20 @@ Why a gate at all: without it, your mic picks up the assistant's own voice from 
 
 The frontend anchor uses a regex that locks on the **structural shape** of the `onaudioprocess` arrow plus the **semantic** string `` `talk.realtime.relayAudio` ``. Helper functions (`lG`, `sG`, ...) can be renamed by the minifier across rebuilds without breaking the anchor.
 
-### 4. Manual mute button + Ctrl+M shortcut + barge-in on unmute (v2.3)
+### 4. Manual mute button + Ctrl+M shortcut + barge-in on unmute (v2.4)
 
-A small floating button is injected at the bottom-left of the OpenClaw UI, near the existing Talk control:
+A small floating button is injected at the bottom-right of the OpenClaw UI:
 
 - **MIC ON** (green) — relay pump sends mic audio normally.
 - **MIC MUTED** (red) — relay pump sends silence frames (the connection stays alive, the assistant keeps talking, you just can't be heard).
 
 Click or press `Ctrl+M` to toggle. State persists in `localStorage["openclaw.micMuted"]`.
 
+The button auto-anchors to the right edge of the viewport (stable across sidebar collapse/expand) and self-heals via a `MutationObserver` — if React removes it during a re-render, it gets re-attached automatically. Position is tunable via four `localStorage` knobs (see below).
+
 **On unmute**, the gate is reset so your voice reaches OpenAI's VAD immediately, triggering the realtime API's natural barge-in. The assistant stops generating new audio. Note that any audio already buffered in your browser will still play out as it drains — barge-in cancels generation, not local playback.
 
 This complements the automatic gate — the gate handles the common case (assistant audio queued, mic silent), the manual mute handles the edge case the gate can't fully solve (acoustic feedback from open speakers, where the assistant's own voice reaches your microphone over the air and trips OpenAI's VAD regardless of any client-side gating).
-
-The button position is overridable at runtime via `localStorage["openclaw.muteBtnLeft"]` and `localStorage["openclaw.muteBtnBottom"]`.
 
 ---
 
@@ -220,9 +220,9 @@ Rough guidance:
 
 ---
 
-## Manual mute button (v2.3)
+## Manual mute button (v2.4)
 
-The patch injects a small floating button into the OpenClaw UI (bottom-left, next to the existing Talk control) that toggles the microphone:
+The patch injects a small floating button into the OpenClaw UI (bottom-right by default) that toggles the microphone:
 
 - **MIC ON** (green) — relay pump sends mic audio normally.
 - **MIC MUTED** (red) — relay pump replaces every mic frame with silence (zero-fill of the input buffer). The realtime session and the OpenClaw relay both stay healthy; the assistant keeps generating audio while you're muted.
@@ -231,7 +231,11 @@ Click the button or press **`Ctrl+M`** anywhere on the page to toggle. The keybo
 
 State persists across reloads in `localStorage["openclaw.micMuted"]` (`"1"` when muted, absent when on).
 
-### Barge-in on unmute (v2.3)
+### Self-healing (v2.4)
+
+The button is created via an IIFE appended to the bundle. OpenClaw's React app sometimes replaces `document.body`'s children when it re-renders, which removes any externally-injected DOM. v2.4 watches for this with a `MutationObserver` on `document.body` and re-attaches the button whenever it detects the removal. From the user's perspective, the button stays put across page refreshes and React re-renders — no need to unregister the service worker just to make it reappear.
+
+### Barge-in on unmute (v2.3+)
 
 When you toggle from MUTED back to ON during the assistant's reply, the gate's `playhead` is reset so the next mic frames flow immediately to OpenAI's realtime API. The API's VAD detects your voice and issues a barge-in event, which causes the assistant to stop generating new audio.
 
@@ -239,15 +243,23 @@ When you toggle from MUTED back to ON during the assistant's reply, the gate's `
 
 In practice the flow is: mute → listen → unmute and start speaking → assistant trails off over a couple of seconds, then your turn.
 
-### Button position
+### Button position (v2.4)
 
-Default position is `left: 110px; bottom: 28px` from the viewport, sized to fit alongside the existing Talk control. Override at runtime:
+Default is right-edge anchored: `right: 16px; bottom: 80px` from the viewport. The right edge is stable — sidebar collapse/expand doesn't shift it. Override via any of four runtime knobs:
 
 ```js
-localStorage.setItem('openclaw.muteBtnLeft',   '150px')
-localStorage.setItem('openclaw.muteBtnBottom', '40px')
-// reload the page to apply
+// Distance from edges (defaults shown)
+localStorage.setItem('openclaw.muteBtnRight',  '16px')
+localStorage.setItem('openclaw.muteBtnBottom', '80px')
+
+// Or anchor from the opposite edge instead (these override Right/Bottom)
+localStorage.setItem('openclaw.muteBtnLeft', '480px')   // pin to a specific x from left
+localStorage.setItem('openclaw.muteBtnTop',  '100px')   // pin to a specific y from top
+
+// Reload (or just close-and-reopen the OpenClaw tab) to apply
 ```
+
+Setting `Left` makes the button left-anchored and the `Right` knob is ignored. Same for `Top` over `Bottom`. To switch back from left-anchor to right-anchor, `removeItem` the Left knob.
 
 To toggle the mute state from the console (e.g. for scripting or testing):
 
@@ -384,12 +396,13 @@ openclaw gateway restart
 
 ---
 
-## Upgrading from v2.1 or v2.2 to v2.3
+## Upgrading from v2.1 / v2.2 / v2.3 to v2.4
 
-Just re-run the script. v2.3's patcher detects whichever earlier version is on the bundle:
+Just re-run the script. v2.4's patcher detects whichever earlier version is on the bundle:
 
-- v2.1 (gate only): adds the silence-frame mute logic and the new UI block.
-- v2.2 (gate + early-return mute + bottom-right UI): replaces the early-return mute with v2.3's silence-frame + barge-in logic, strips the v2.2 UI block, and appends the v2.3 UI block at the new bottom-left position.
+- **v2.1** (gate only): adds the v2.3 silence-frame mute logic and the v2.4 UI block.
+- **v2.2** (gate + early-return mute + bottom-right UI): replaces the early-return mute with v2.3's silence-frame + barge-in logic, strips the v2.2 UI block, appends the v2.4 UI block.
+- **v2.3** (gate + silence-frame mute + bottom-left UI): keeps the mute logic (it's identical), strips the v2.3 UI block, appends the v2.4 UI block (right-anchored + self-healing).
 
 ```bash
 ./apply-openclaw-firefox-talk-patch.sh
