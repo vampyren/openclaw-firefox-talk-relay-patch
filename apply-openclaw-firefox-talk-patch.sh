@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.5)
+# OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.6)
 #
 # Purpose:
 #   1. Force OpenAI Web UI Start Talk through gateway-relay instead of browser-direct WebRTC SDP.
@@ -14,15 +14,21 @@ set -euo pipefail
 #      localStorage["openclaw.micMuted"].
 #   5. Optionally set up OPENAI_API_KEY securely for OpenClaw SecretRef/env usage.
 #
+# Changes in v2.6:
+#   - Mute button is now DOM-anchored: inserted as a sibling INSIDE the
+#     .agent-chat__toolbar-left container, right after the Start Talk button. The
+#     button moves with OpenClaw's layout naturally (flexbox flow), so it stays in
+#     the right place across viewport resizes, sidebar collapses, and display swaps.
+#   - Falls back to fixed positioning with the v2.5 defaults / knobs only if the
+#     toolbar can't be found (e.g., OpenClaw layout changes in a future version).
+#   - MutationObserver now uses requestAnimationFrame to batch DOM-change reactions
+#     into one check per frame instead of firing per individual mutation.
+#
 # Changes in v2.5:
-#   - Default button position changed to left:399px top:843px (right next to the
-#     existing broadcast/Talk icon for typical layouts). Override at runtime via the
-#     four position knobs (see v2.4 below).
+#   - Default fallback button position changed to left:399px top:843px.
 #
 # Changes in v2.4:
-#   - Mute button repositioned to right-edge anchor; four position knobs added.
-#   - MutationObserver-based self-healing: the button is re-attached if React removes
-#     it during a re-render (was disappearing on refresh).
+#   - Right-edge anchor + four position knobs + MutationObserver self-healing.
 #
 # Changes in v2.3:
 #   - Mute sends silence frames (zero-fill) instead of skipping the relay call, keeping
@@ -72,7 +78,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 print_help() {
     cat <<EOF
-OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.5)
+OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.6)
 
 Usage:
   $(basename "$0")                       Apply the patch.
@@ -358,37 +364,72 @@ MUTE_MARKER_V23 = 'this._wasMuted'
 # v2.2 used a simple early-return; if we see that, we replace it with the v2.3 expression.
 MUTE_V22_TEXT = 'if(localStorage.getItem("openclaw.micMuted")==="1")return;'
 
-# ---- Patch 3c (v2.5): floating mute button + Ctrl+M shortcut, repositioned ----
-# Default position: left:399px top:843px (lands next to the existing broadcast/Talk
-# icon on a typical OpenClaw layout). All four position knobs still work for overrides.
-# Button self-heals via MutationObserver if React removes it during a re-render.
+# ---- Patch 3c (v2.6): floating mute button + Ctrl+M shortcut, DOM-anchored ----
+# Tries to insert the mute button as a sibling INSIDE OpenClaw's chat toolbar
+# (.agent-chat__toolbar-left), right after the "Start Talk" button. This makes
+# the mute button move naturally with the toolbar's flexbox layout, so it stays
+# in the right place across viewport resizes and sidebar collapses.
+# If the toolbar selector ever changes (future OpenClaw update), falls back to
+# fixed positioning with the v2.5 defaults / four position knobs.
 UI_MARKER_V22 = '/*__OPENCLAW_MUTE_BUTTON_V22__*/'
 UI_MARKER_V23 = '/*__OPENCLAW_MUTE_BUTTON_V23__*/'
 UI_MARKER_V24 = '/*__OPENCLAW_MUTE_BUTTON_V24__*/'
 UI_MARKER_V25 = '/*__OPENCLAW_MUTE_BUTTON_V25__*/'
-UI_BLOCK = '\n;' + UI_MARKER_V25 + '''(function(){
+UI_MARKER_V26 = '/*__OPENCLAW_MUTE_BUTTON_V26__*/'
+UI_BLOCK = '\n;' + UI_MARKER_V26 + '''(function(){
 if(window.__openclawMuteBtn)return;
 window.__openclawMuteBtn=true;
 var btn=null;
-function build(){
+var attachTarget=null;
+var pending=false;
+function findInsertionPoint(){
+var talkBtn=document.querySelector('button[aria-label="Start Talk"]');
+if(talkBtn&&talkBtn.parentElement)return{container:talkBtn.parentElement,after:talkBtn};
+var toolbar=document.querySelector('.agent-chat__toolbar-left');
+if(toolbar)return{container:toolbar,after:null};
+return null;
+}
+function build(mode){
 var b=document.createElement("button");
 b.id="__openclaw-mute-btn";
 b.title="Toggle microphone (Ctrl+M)";
+var base={padding:"6px 12px",border:"none",borderRadius:"6px",cursor:"pointer",fontSize:"12px",fontWeight:"600",fontFamily:"system-ui,sans-serif",letterSpacing:"0.4px",color:"#fff",userSelect:"none",height:"32px",lineHeight:"20px"};
+if(mode==="inline"){
+Object.assign(b.style,base,{position:"static",marginLeft:"8px",flexShrink:"0",verticalAlign:"middle"});
+}else{
 var bL=localStorage.getItem("openclaw.muteBtnLeft");
 var bR=localStorage.getItem("openclaw.muteBtnRight");
 var bT=localStorage.getItem("openclaw.muteBtnTop");
 var bB=localStorage.getItem("openclaw.muteBtnBottom");
-var style={position:"fixed",padding:"6px 12px",border:"none",borderRadius:"6px",cursor:"pointer",fontSize:"12px",fontWeight:"600",fontFamily:"system-ui,sans-serif",letterSpacing:"0.4px",zIndex:"2147483647",boxShadow:"0 2px 6px rgba(0,0,0,0.3)",color:"#fff",userSelect:"none",height:"32px",lineHeight:"20px"};
-if(bL)style.left=bL;else if(bR)style.right=bR;else style.left="399px";
-if(bT)style.top=bT;else if(bB)style.bottom=bB;else style.top="843px";
-Object.assign(b.style,style);
+var fx={position:"fixed",zIndex:"2147483647",boxShadow:"0 2px 6px rgba(0,0,0,0.3)"};
+if(bL)fx.left=bL;else if(bR)fx.right=bR;else fx.left="399px";
+if(bT)fx.top=bT;else if(bB)fx.bottom=bB;else fx.top="843px";
+Object.assign(b.style,base,fx);
+}
 b.addEventListener("click",toggle);
 return b;
 }
 function render(){if(!btn)return;var m=localStorage.getItem("openclaw.micMuted")==="1";btn.style.backgroundColor=m?"#dc2626":"#10b981";btn.textContent=m?"MIC MUTED":"MIC ON";btn.setAttribute("aria-pressed",String(m));}
 function toggle(){var m=localStorage.getItem("openclaw.micMuted")==="1";if(m)localStorage.removeItem("openclaw.micMuted");else localStorage.setItem("openclaw.micMuted","1");render();}
-function ensureAttached(){if(!document.body)return;if(btn&&document.body.contains(btn))return;btn=build();document.body.appendChild(btn);render();}
-function init(){if(!document.body){setTimeout(init,100);return;}ensureAttached();try{var obs=new MutationObserver(function(){ensureAttached();});obs.observe(document.body,{childList:true});}catch(_){}}
+function ensureAttached(){
+if(!document.body)return;
+if(btn&&attachTarget&&attachTarget.contains(btn)&&document.body.contains(attachTarget))return;
+if(btn&&btn.parentElement)btn.parentElement.removeChild(btn);
+btn=null;
+var ip=findInsertionPoint();
+btn=build(ip?"inline":"fixed");
+if(ip){
+if(ip.after)ip.after.parentNode.insertBefore(btn,ip.after.nextSibling);
+else ip.container.appendChild(btn);
+attachTarget=ip.container;
+}else{
+document.body.appendChild(btn);
+attachTarget=document.body;
+}
+render();
+}
+function scheduleCheck(){if(pending)return;pending=true;requestAnimationFrame(function(){pending=false;ensureAttached();});}
+function init(){if(!document.body){setTimeout(init,100);return;}ensureAttached();try{var obs=new MutationObserver(scheduleCheck);obs.observe(document.body,{childList:true,subtree:true});}catch(_){}}
 document.addEventListener("keydown",function(e){if(e.ctrlKey&&!e.shiftKey&&!e.altKey&&!e.metaKey&&(e.key==="m"||e.key==="M")){e.preventDefault();toggle();}});
 if(document.readyState!=="loading")init();
 else document.addEventListener("DOMContentLoaded",init);
@@ -449,13 +490,14 @@ def patch_frontend(path):
         changed = True
         print(f'PATCH_OK: {mute_label}')
 
-    # 3c: UI bootstrap (v2.5 with new defaults at left:399px top:843px)
-    ui_label = 'inject mute button + Ctrl+M shortcut (v2.5)'
-    if UI_MARKER_V25 in text:
+    # 3c: UI bootstrap (v2.6 DOM-anchored to chat toolbar)
+    ui_label = 'inject mute button + Ctrl+M shortcut (v2.6, DOM-anchored)'
+    if UI_MARKER_V26 in text:
         print(f'SKIP already patched: {ui_label}')
     else:
         # Strip any earlier UI block (we appended each at end-of-file with leading '\n;').
         for older_marker, name in (
+            (UI_MARKER_V25, 'v2.5'),
             (UI_MARKER_V24, 'v2.4'),
             (UI_MARKER_V23, 'v2.3'),
             (UI_MARKER_V22, 'v2.2'),
@@ -502,20 +544,17 @@ PY
     echo
     echo "PATCH_DONE"
     echo
-    echo "Mute button (v2.5):"
-    echo "  Floating MIC ON / MIC MUTED button next to the broadcast/Talk icon."
+    echo "Mute button (v2.6):"
+    echo "  Floating MIC ON / MIC MUTED button injected into the OpenClaw chat toolbar,"
+    echo "  next to the existing 'Start Talk' button. Anchors to the toolbar DOM, so it"
+    echo "  moves with the layout (no fixed pixel coords)."
     echo "  Click it or press Ctrl+M to toggle. State persists in localStorage."
-    echo "  Self-heals via MutationObserver if React removes it during a re-render."
     echo "  - While muted: silence frames flow normally (assistant keeps talking, you"
     echo "    just can't be heard). Connection stays healthy."
     echo "  - On unmute: gate is reset so your voice reaches the API immediately,"
     echo "    triggering OpenAI's natural barge-in to stop the assistant's response."
-    echo "  Default position: left:399px top:843px. Override via:"
-    echo "    localStorage.setItem('openclaw.muteBtnLeft',  '<px>')"
-    echo "    localStorage.setItem('openclaw.muteBtnTop',   '<px>')"
-    echo "    localStorage.setItem('openclaw.muteBtnRight', '<px>')   // overrides Left default"
-    echo "    localStorage.setItem('openclaw.muteBtnBottom','<px>')   // overrides Top default"
-    echo "  Then hard-refresh the page."
+    echo "  Fallback: if OpenClaw's toolbar selector ever changes, the button falls"
+    echo "  back to fixed positioning at left:399px top:843px (or your saved knobs)."
     echo
     echo "Tune the mic gate (browser DevTools console on the OpenClaw page):"
     echo "  localStorage.setItem('openclaw.micGateMs', '250')   // stricter no-echo"

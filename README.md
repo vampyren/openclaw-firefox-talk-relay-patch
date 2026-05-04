@@ -111,9 +111,9 @@ Why a gate at all: without it, your mic picks up the assistant's own voice from 
 
 The frontend anchor uses a regex that locks on the **structural shape** of the `onaudioprocess` arrow plus the **semantic** string `` `talk.realtime.relayAudio` ``. Helper functions (`lG`, `sG`, ...) can be renamed by the minifier across rebuilds without breaking the anchor.
 
-### 4. Manual mute button + Ctrl+M shortcut + barge-in on unmute (v2.5)
+### 4. Manual mute button + Ctrl+M shortcut + barge-in on unmute (v2.6)
 
-A small floating button is injected next to the existing broadcast/Talk icon (default `left: 399px; top: 843px` — tunable):
+A small button is inserted **inside OpenClaw's chat toolbar**, right after the existing Start Talk button:
 
 - **MIC ON** (green) — relay pump sends mic audio normally.
 - **MIC MUTED** (red) — relay pump sends silence frames (the connection stays alive, the assistant keeps talking, you just can't be heard).
@@ -220,9 +220,9 @@ Rough guidance:
 
 ---
 
-## Manual mute button (v2.5)
+## Manual mute button (v2.6)
 
-The patch injects a small floating button into the OpenClaw UI (default position: next to the broadcast/Talk icon) that toggles the microphone:
+The patch injects a button into OpenClaw's chat toolbar (`.agent-chat__toolbar-left`), as a sibling immediately after the Start Talk button. It flows in the toolbar's flexbox layout — moves with the layout naturally, no fixed pixel coords needed. Toggle the microphone:
 
 - **MIC ON** (green) — relay pump sends mic audio normally.
 - **MIC MUTED** (red) — relay pump replaces every mic frame with silence (zero-fill of the input buffer). The realtime session and the OpenClaw relay both stay healthy; the assistant keeps generating audio while you're muted.
@@ -243,23 +243,26 @@ When you toggle from MUTED back to ON during the assistant's reply, the gate's `
 
 In practice the flow is: mute → listen → unmute and start speaking → assistant trails off over a couple of seconds, then your turn.
 
-### Button position (v2.5)
+### Button position (v2.6)
 
-Default is `left: 399px; top: 843px` from the viewport — chosen to land next to the existing broadcast/Talk icon on a typical OpenClaw layout. Pixel coords are tied to viewport size, so if you resize the window or move to a different machine you may need to re-position. Override via any of four runtime knobs:
+The button is **DOM-anchored** to OpenClaw's chat toolbar — it inserts as a sibling inside `.agent-chat__toolbar-left`, right after the Start Talk button. Position adjusts automatically with the toolbar's layout. No pixel coordinates needed.
+
+If OpenClaw's toolbar selectors ever change in a future version (the patch looks for `button[aria-label="Start Talk"]` first, then falls back to `.agent-chat__toolbar-left`), the button falls back to fixed positioning at `left: 399px; top: 843px`. The four position knobs from v2.4 still work as overrides for that fallback:
 
 ```js
-// Distance from edges (use whichever pair fits your layout)
-localStorage.setItem('openclaw.muteBtnLeft', '399px')   // default 399px
-localStorage.setItem('openclaw.muteBtnTop',  '843px')   // default 843px
-
-// Or anchor from the opposite edge (these override Left/Top)
-localStorage.setItem('openclaw.muteBtnRight',  '16px')  // pin to a specific x from right
-localStorage.setItem('openclaw.muteBtnBottom', '80px')  // pin to a specific y from bottom
-
-// Reload (or close-and-reopen the OpenClaw tab) to apply
+// Only used when DOM anchoring fails (toolbar selector changed)
+localStorage.setItem('openclaw.muteBtnLeft',   '<px>')
+localStorage.setItem('openclaw.muteBtnTop',    '<px>')
+localStorage.setItem('openclaw.muteBtnRight',  '<px>')   // overrides Left default
+localStorage.setItem('openclaw.muteBtnBottom', '<px>')   // overrides Top default
 ```
 
-Setting `Right` makes the button right-anchored and the default `Left` is ignored. Same for `Bottom` over the default `Top`. To revert to the v2.5 defaults, `removeItem` all four knobs and reload.
+To clear stale fallback overrides (e.g. after upgrading from v2.5 where you had dragged the button):
+
+```js
+['muteBtnLeft','muteBtnRight','muteBtnTop','muteBtnBottom']
+    .forEach(k => localStorage.removeItem('openclaw.' + k));
+```
 
 To toggle the mute state from the console (e.g. for scripting or testing):
 
@@ -396,9 +399,9 @@ openclaw gateway restart
 
 ---
 
-## Upgrading from v2.1 / v2.2 / v2.3 / v2.4 to v2.5
+## Upgrading from v2.1 / v2.2 / v2.3 / v2.4 / v2.5 to v2.6
 
-Just re-run the script. v2.5's patcher detects whichever earlier version is on the bundle, keeps the unchanged pieces, strips the old UI block, and appends the v2.5 UI block (default position: next to the broadcast/Talk icon).
+Just re-run the script. v2.6's patcher detects whichever earlier version is on the bundle, keeps the unchanged pieces, strips the old UI block, and appends the v2.6 UI block (DOM-anchored to chat toolbar).
 
 - **v2.1** (gate only): adds the v2.3 silence-frame mute logic and the v2.4 UI block.
 - **v2.2** (gate + early-return mute + bottom-right UI): replaces the early-return mute with v2.3's silence-frame + barge-in logic, strips the v2.2 UI block, appends the v2.4 UI block.
