@@ -1,0 +1,4 @@
+# Personal scratch — next-session planning briefs that drive each release.
+# Briefs are working documents, not repo history; the actual changes get
+# captured in commit messages and the README changelog.
+briefs/
