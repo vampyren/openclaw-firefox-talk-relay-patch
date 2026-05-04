@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.7.2)
+# OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.7.3)
 #
 # Purpose:
 #   1. Force OpenAI Web UI Start Talk through gateway-relay instead of browser-direct WebRTC SDP.
@@ -13,6 +13,15 @@ set -euo pipefail
 #      feedback can defeat any automatic gate). Mute state persists across reloads in
 #      localStorage["openclaw.micMuted"].
 #   5. Optionally set up OPENAI_API_KEY securely for OpenClaw SecretRef/env usage.
+#
+# Changes in v2.7.3:
+#   - Mute button now hides on non-chat pages (Agents, Channels, etc.) instead of
+#     falling back to fixed-mode floating over unrelated UI. ensureAttached() checks
+#     for the .shell--chat marker; when absent the button is detached and not rendered.
+#     Returning to chat re-attaches inline via the existing MutationObserver self-heal.
+#     The original "toolbar selector broke on chat page -> fixed-mode fallback" intent
+#     is preserved (chat shell present + toolbar absent still falls back to fixed).
+#   - IIFE marker bumped V27 -> V28; older V27 block is stripped on apply.
 #
 # Changes in v2.7.2:
 #   - --dry-run flag: runs preflight, discovery, anchor checks, and reports what WOULD
@@ -132,7 +141,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 print_help() {
     cat <<EOF
-OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.7.2)
+OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.7.3)
 
 Usage:
   $(basename "$0")                       Apply the patch.
@@ -434,20 +443,26 @@ MUTE_MARKER_V23 = 'this._wasMuted'
 # v2.2 used a simple early-return; if we see that, we replace it with the v2.3 expression.
 MUTE_V22_TEXT = 'if(localStorage.getItem("openclaw.micMuted")==="1")return;'
 
-# ---- Patch 3c (v2.7): floating mute button + Ctrl+M shortcut, DOM-anchored ----
+# ---- Patch 3c (v2.8): floating mute button + Ctrl+M shortcut, DOM-anchored ----
 # Inserts the mute button as a sibling INSIDE OpenClaw's chat toolbar
 # (.agent-chat__toolbar-left), right after the "Start Talk" button.
-# v2.7 fix: previous v2.6 had a state-machine bug where if the IIFE ran before
-# React mounted the toolbar, the button got stuck in fallback fixed-mode and never
-# upgraded to inline-mode when the toolbar appeared. v2.7 tracks attach-mode and
-# always re-checks for the toolbar while in fixed-mode.
+# v2.8 fix: previous v2.7 attached a fixed-mode floating button on every page
+# without a toolbar, which meant Agents/Channels/etc. got the button floating
+# over unrelated UI. v2.8 gates attach on the .shell--chat marker: no chat shell
+# means no button. The intentional "chat shell present but toolbar selector
+# broken" fallback to fixed-mode is preserved.
+# v2.7 fix (retained): previous v2.6 had a state-machine bug where if the IIFE ran
+# before React mounted the toolbar, the button got stuck in fallback fixed-mode and
+# never upgraded to inline-mode when the toolbar appeared. v2.7 tracks attach-mode
+# and always re-checks for the toolbar while in fixed-mode.
 UI_MARKER_V22 = '/*__OPENCLAW_MUTE_BUTTON_V22__*/'
 UI_MARKER_V23 = '/*__OPENCLAW_MUTE_BUTTON_V23__*/'
 UI_MARKER_V24 = '/*__OPENCLAW_MUTE_BUTTON_V24__*/'
 UI_MARKER_V25 = '/*__OPENCLAW_MUTE_BUTTON_V25__*/'
 UI_MARKER_V26 = '/*__OPENCLAW_MUTE_BUTTON_V26__*/'
 UI_MARKER_V27 = '/*__OPENCLAW_MUTE_BUTTON_V27__*/'
-UI_BLOCK = '\n;' + UI_MARKER_V27 + '''(function(){
+UI_MARKER_V28 = '/*__OPENCLAW_MUTE_BUTTON_V28__*/'
+UI_BLOCK = '\n;' + UI_MARKER_V28 + '''(function(){
 if(window.__openclawMuteBtn)return;
 window.__openclawMuteBtn=true;
 var btn=null;
@@ -485,6 +500,15 @@ function render(){if(!btn)return;var m=localStorage.getItem("openclaw.micMuted")
 function toggle(){var m=localStorage.getItem("openclaw.micMuted")==="1";if(m)localStorage.removeItem("openclaw.micMuted");else localStorage.setItem("openclaw.micMuted","1");render();}
 function ensureAttached(){
 if(!document.body)return;
+// Gate: only show on chat pages. .shell--chat is OpenClaw's BEM modifier on the
+// top-level shell when chat mode is active (absent on Agents/Channels/etc.).
+var onChat=!!document.querySelector(".shell--chat");
+if(!onChat){
+if(attachMode==="absent")return;
+if(btn&&btn.parentElement)btn.parentElement.removeChild(btn);
+btn=null;attachTarget=null;attachMode="absent";
+return;
+}
 // Fast-return ONLY if inline-mode and stable. Fixed-mode always re-checks
 // because we want to upgrade to inline as soon as the toolbar appears.
 if(attachMode==="inline"&&btn&&attachTarget&&attachTarget.contains(btn)&&document.body.contains(attachTarget))return;
@@ -578,13 +602,14 @@ def patch_frontend(path):
         changed = True
         _ok(mute_label)
 
-    # 3c: UI bootstrap (v2.7 with fixed-mode upgrade-to-inline state machine)
-    ui_label = 'inject mute button + Ctrl+M shortcut (v2.7, DOM-anchored)'
-    if UI_MARKER_V27 in text:
+    # 3c: UI bootstrap (v2.8: hides on non-chat pages via .shell--chat marker)
+    ui_label = 'inject mute button + Ctrl+M shortcut (v2.8, hides on non-chat pages)'
+    if UI_MARKER_V28 in text:
         print(f'SKIP already patched: {ui_label}')
     else:
         # Strip any earlier UI block (we appended each at end-of-file with leading '\n;').
         for older_marker, name in (
+            (UI_MARKER_V27, 'v2.7'),
             (UI_MARKER_V26, 'v2.6'),
             (UI_MARKER_V25, 'v2.5'),
             (UI_MARKER_V24, 'v2.4'),
@@ -675,7 +700,7 @@ PY
     echo
     echo "PATCH_DONE"
     echo
-    echo "Mute button (v2.6):"
+    echo "Mute button (v2.8):"
     echo "  Floating MIC ON / MIC MUTED button injected into the OpenClaw chat toolbar,"
     echo "  next to the existing 'Start Talk' button. Anchors to the toolbar DOM, so it"
     echo "  moves with the layout (no fixed pixel coords)."
@@ -684,8 +709,11 @@ PY
     echo "    just can't be heard). Connection stays healthy."
     echo "  - On unmute: gate is reset so your voice reaches the API immediately,"
     echo "    triggering OpenAI's natural barge-in to stop the assistant's response."
-    echo "  Fallback: if OpenClaw's toolbar selector ever changes, the button falls"
-    echo "  back to fixed positioning at left:399px top:843px (or your saved knobs)."
+    echo "  - On non-chat pages (Agents, Channels, etc.): button is hidden. It"
+    echo "    re-attaches inline when you return to a chat page."
+    echo "  Fallback: on a chat page where the toolbar selector has changed but the"
+    echo "  chat shell is still present, the button falls back to fixed positioning"
+    echo "  at left:399px top:843px (or your saved knobs)."
     echo
     echo "Tune the mic gate (browser DevTools console on the OpenClaw page):"
     echo "  localStorage.setItem('openclaw.micGateMs', '250')   // stricter no-echo"
