@@ -440,11 +440,16 @@ This patch does not log or expose API keys.
 
 ```
 ./apply-openclaw-firefox-talk-patch.sh                       # apply
+./apply-openclaw-firefox-talk-patch.sh --dry-run             # check anchors, no writes
 ./apply-openclaw-firefox-talk-patch.sh --setup-openai-key    # store API key
 ./apply-openclaw-firefox-talk-patch.sh --rollback latest     # restore most recent backup
 ./apply-openclaw-firefox-talk-patch.sh --prune-backups [N]   # prune old backups, keep last N
 ./apply-openclaw-firefox-talk-patch.sh --help                # usage
 ```
+
+`--dry-run` is the recommended first step after any OpenClaw upgrade. It runs preflight, bundle discovery, and anchor checks, then reports what would be patched (`WOULD_PATCH:` lines) without modifying any file. If anchors changed in the upgrade, the dry-run aborts cleanly with a clear ABORT message and zero file mutations.
+
+After every real apply, the script runs `node --check` against each patched bundle. If any patched file fails to parse as JavaScript, the script restores all three bundles from the just-made backup and aborts. Requires `node` on PATH; if missing, validation is skipped with a warning.
 
 Environment variables:
 

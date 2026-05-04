@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.7.1)
+# OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.7.2)
 #
 # Purpose:
 #   1. Force OpenAI Web UI Start Talk through gateway-relay instead of browser-direct WebRTC SDP.
@@ -14,11 +14,56 @@ set -euo pipefail
 #      localStorage["openclaw.micMuted"].
 #   5. Optionally set up OPENAI_API_KEY securely for OpenClaw SecretRef/env usage.
 #
+# Changes in v2.7.2:
+#   - --dry-run flag: runs preflight, discovery, anchor checks, and reports what WOULD
+#     be patched, but does not modify any file. Useful as a "check before commit" pass
+#     after OpenClaw upgrades. Exits non-zero if any anchor check would fail.
+#   - Post-write JS validation: after each patched bundle is written, the script runs
+#     'node --check' against it. If validation fails, the just-made backup is restored
+#     automatically and the script aborts. Catches the rare case where a write produces
+#     unparseable JS (autolink corruption, partial write, write-during-update, etc.).
+#     If 'node' is not on PATH, validation is skipped with a warning, not an abort.
+#
 # Changes in v2.7.1:
 #   - Compatibility with OpenClaw 2026.5.3, which split server-methods bundle into two
 #     files (the original server-methods-*.js plus a new server-methods-list-*.js).
 #     The discovery glob now excludes the -list- variant so we patch the right file.
 #     The patch anchor itself is unchanged and still matches.
+#
+# Changes in v2.7:
+#   - Bugfix: when the IIFE ran before React had mounted the chat toolbar, v2.6 fell
+#     back to fixed positioning and then the MutationObserver's fast-path early-return
+#     prevented it from upgrading to inline-mode once the toolbar appeared. v2.7 tracks
+#     attach-mode separately and always re-checks for the toolbar while in fixed-mode,
+#     so it transitions to inline as soon as the toolbar exists.
+#   - Defensive cleanup at init: removes any pre-existing button with our id before
+#     attaching, in case of leftover state from prior IIFE runs.
+#
+# Changes in v2.6:
+#   - Mute button DOM-anchored to .agent-chat__toolbar-left (no fixed pixel coords).
+#   - rAF batching for MutationObserver callbacks.
+#
+# Changes in v2.5:
+#   - Default fallback button position changed to left:399px top:843px.
+#
+# Changes in v2.4:
+#   - Right-edge anchor + four position knobs + MutationObserver self-healing.
+#
+# Changes in v2.3:
+#   - Mute sends silence frames (zero-fill) instead of skipping the relay call, keeping
+#     the realtime session healthy and the assistant talking while you can't be heard.
+#   - Unmute resets the gate so voice reaches the API immediately, triggering OpenAI's
+#     natural barge-in. (Local audio buffer drain is out of scope -- expect "trails off".)
+#
+# Changes in v2.2:
+#   - Floating mute button + Ctrl+M shortcut.
+#
+# Changes in v2.1:
+#   - Key is passed to Python via file descriptor 3 instead of an env var,
+#     so it is no longer visible in /proc/<pid>/environ during the python process.
+#   - Reject extra positional arguments (e.g. "./script.sh --setup-openai-key garbage").
+#
+# Tested against: OpenClaw 2026.5.2, 2026.5.3
 #
 # Changes in v2.7:
 #   - Bugfix: when the IIFE ran before React had mounted the chat toolbar, v2.6 fell
@@ -87,10 +132,11 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 print_help() {
     cat <<EOF
-OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.7.1)
+OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.7.2)
 
 Usage:
   $(basename "$0")                       Apply the patch.
+  $(basename "$0") --dry-run             Show what would be patched, without writing.
   $(basename "$0") --setup-openai-key    Store OpenAI API key in ~/.openclaw/.env (mode 600).
   $(basename "$0") --rollback latest     Restore the most recent backup.
   $(basename "$0") --prune-backups [N]   Prune old backups, keeping last N (default \$KEEP_BACKUPS=$KEEP_BACKUPS).
@@ -300,19 +346,31 @@ rollback_latest() {
 # Apply patch
 # ---------------------------------------------------------------------------
 apply_patch() {
+    local DRY_RUN="${1:-0}"
+
     preflight_apply
 
     local TS BACKUP_DIR
     TS="$(date +%Y%m%d-%H%M%S)"
     BACKUP_DIR="$BACKUP_BASE/backup-$TS"
-    mkdir -p "$BACKUP_DIR"
-    cp -a "$SERVER_METHODS" "$BACKUP_DIR/server-methods.js.bak"
-    cp -a "$SERVER_IMPL"    "$BACKUP_DIR/server.impl.js.bak"
-    cp -a "$FRONTEND"       "$BACKUP_DIR/control-ui-index.js.bak"
+    if [[ "$DRY_RUN" == "1" ]]; then
+        echo "DRY-RUN: discovery and anchor checks only. No files will be modified."
+        echo
+    else
+        mkdir -p "$BACKUP_DIR"
+        cp -a "$SERVER_METHODS" "$BACKUP_DIR/server-methods.js.bak"
+        cp -a "$SERVER_IMPL"    "$BACKUP_DIR/server.impl.js.bak"
+        cp -a "$FRONTEND"       "$BACKUP_DIR/control-ui-index.js.bak"
+    fi
 
-    python3 - "$SERVER_METHODS" "$SERVER_IMPL" "$FRONTEND" <<'PY'
-import re, sys
+    OPENCLAW_PATCH_DRY_RUN="$DRY_RUN" python3 - "$SERVER_METHODS" "$SERVER_IMPL" "$FRONTEND" <<'PY'
+import os, re, sys
 from pathlib import Path
+
+DRY_RUN = os.environ.get('OPENCLAW_PATCH_DRY_RUN', '0') == '1'
+
+def _ok(msg):
+    print(('WOULD_PATCH: ' if DRY_RUN else 'PATCH_OK: ') + msg)
 
 server_methods = Path(sys.argv[1])
 server_impl    = Path(sys.argv[2])
@@ -473,8 +531,9 @@ def patch_literal(path, old, new, label):
     n = text.count(old)
     if n != 1:
         sys.exit(f'ABORT: {label}: expected exactly 1 match in {path.name}, found {n}')
-    path.write_text(text.replace(old, new, 1))
-    print(f'PATCH_OK: {label}')
+    if not DRY_RUN:
+        path.write_text(text.replace(old, new, 1))
+    _ok(label)
 
 def patch_frontend(path):
     text = path.read_text()
@@ -497,7 +556,7 @@ def patch_frontend(path):
             )
         text = FE_PATTERN.sub(FE_REPL, text, count=1)
         changed = True
-        print(f'PATCH_OK: {gate_label}')
+        _ok(gate_label)
 
     # 3b: silence-frame mute + barge-in on unmute (v2.3)
     mute_label = 'silence-frame mute + barge-in on unmute (v2.3)'
@@ -507,7 +566,7 @@ def patch_frontend(path):
         # In-place upgrade from v2.2's early-return mute to v2.3 silence-frame mute.
         text = text.replace(MUTE_V22_TEXT, MUTE_INSERT, 1)
         changed = True
-        print(f'PATCH_OK: {mute_label} (upgraded from v2.2)')
+        _ok(mute_label + ' (upgraded from v2.2)')
     else:
         # Fresh insert.
         matches = MUTE_PATTERN.findall(text)
@@ -517,7 +576,7 @@ def patch_frontend(path):
             )
         text = MUTE_PATTERN.sub(MUTE_REPL, text, count=1)
         changed = True
-        print(f'PATCH_OK: {mute_label}')
+        _ok(mute_label)
 
     # 3c: UI bootstrap (v2.7 with fixed-mode upgrade-to-inline state machine)
     ui_label = 'inject mute button + Ctrl+M shortcut (v2.7, DOM-anchored)'
@@ -538,10 +597,13 @@ def patch_frontend(path):
                 print(f'  ... removed {name} UI block')
         text = text + UI_BLOCK
         changed = True
-        print(f'PATCH_OK: {ui_label}')
+        _ok(ui_label)
 
     if changed:
-        path.write_text(text)
+        if DRY_RUN:
+            print('WOULD_WRITE: control-ui index bundle (gate/mute/UI changes)')
+        else:
+            path.write_text(text)
 
 patch_literal(server_methods, SM_OLD, SM_NEW,
               'force OpenAI talk.realtime.session to gateway-relay')
@@ -549,6 +611,45 @@ patch_literal(server_impl,    SI_OLD, SI_NEW,
               'allow talk.realtime.relay event through EVENT_SCOPE_GUARDS')
 patch_frontend(frontend)
 PY
+    local PY_RC=$?
+    if (( PY_RC != 0 )); then
+        die "patch step failed (Python exit $PY_RC). No file should be in a half-patched state — review the ABORT message above."
+    fi
+
+    if [[ "$DRY_RUN" == "1" ]]; then
+        echo
+        echo "DRY-RUN complete. No files modified."
+        echo "Run without --dry-run to apply for real."
+        return 0
+    fi
+
+    # Post-write JS validation: parse-check each patched bundle. If any fails,
+    # restore from the just-made backup and abort.
+    if command -v node >/dev/null 2>&1; then
+        local check_failed=""
+        for pair in \
+            "$SERVER_METHODS:server-methods.js.bak" \
+            "$SERVER_IMPL:server.impl.js.bak" \
+            "$FRONTEND:control-ui-index.js.bak"
+        do
+            local path="${pair%%:*}"
+            if ! node --check "$path" >/dev/null 2>&1; then
+                echo "ERROR: post-write JS validation failed for $path" >&2
+                check_failed="$pair"
+                break
+            fi
+        done
+        if [[ -n "$check_failed" ]]; then
+            echo "Restoring from backup: $BACKUP_DIR" >&2
+            cp -a "$BACKUP_DIR/server-methods.js.bak"   "$SERVER_METHODS"
+            cp -a "$BACKUP_DIR/server.impl.js.bak"      "$SERVER_IMPL"
+            cp -a "$BACKUP_DIR/control-ui-index.js.bak" "$FRONTEND"
+            die "patched file did not parse cleanly. Backups restored. No further changes made."
+        fi
+        echo "JS validation passed (node --check on all 3 bundles)."
+    else
+        echo "WARNING: 'node' not on PATH; skipping post-write JS validation." >&2
+    fi
 
     echo
     echo "OpenClaw root: $ROOT"
@@ -617,7 +718,11 @@ PY
 case "$MODE" in
     apply)
         [[ -z "$ARG2" ]] || die "apply mode does not accept extra arguments. Run with --help for usage."
-        apply_patch
+        apply_patch 0
+        ;;
+    --dry-run)
+        [[ -z "$ARG2" ]] || die "--dry-run does not accept extra arguments."
+        apply_patch 1
         ;;
     --setup-openai-key)
         [[ -z "$ARG2" ]] || die "--setup-openai-key does not accept extra arguments."
