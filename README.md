@@ -111,7 +111,7 @@ Why a gate at all: without it, your mic picks up the assistant's own voice from 
 
 The frontend anchor uses a regex that locks on the **structural shape** of the `onaudioprocess` arrow plus the **semantic** string `` `talk.realtime.relayAudio` ``. Helper functions (`lG`, `sG`, ...) can be renamed by the minifier across rebuilds without breaking the anchor.
 
-### 4. Manual mute button + Ctrl+M shortcut + barge-in on unmute (v2.7)
+### 4. Manual mute button + Ctrl+M shortcut + barge-in on unmute
 
 A small button is inserted **inside OpenClaw's chat toolbar**, right after the existing Start Talk button:
 
@@ -220,7 +220,7 @@ Rough guidance:
 
 ---
 
-## Manual mute button (v2.7)
+## Manual mute button
 
 The patch injects a button into OpenClaw's chat toolbar (`.agent-chat__toolbar-left`), as a sibling immediately after the Start Talk button. It flows in the toolbar's flexbox layout — moves with the layout naturally, no fixed pixel coords needed. Toggle the microphone:
 
@@ -243,7 +243,7 @@ When you toggle from MUTED back to ON during the assistant's reply, the gate's `
 
 In practice the flow is: mute → listen → unmute and start speaking → assistant trails off over a couple of seconds, then your turn.
 
-### Button position (v2.7)
+### Button position
 
 The button is **DOM-anchored** to OpenClaw's chat toolbar — it inserts as a sibling inside `.agent-chat__toolbar-left`, right after the Start Talk button. Position adjusts automatically with the toolbar's layout. No pixel coordinates needed.
 
@@ -399,13 +399,9 @@ openclaw gateway restart
 
 ---
 
-## Upgrading from v2.1 / v2.2 / v2.3 / v2.4 / v2.5 to v2.7
+## Upgrading
 
-Just re-run the script. v2.7's patcher detects whichever earlier version is on the bundle, keeps the unchanged pieces, strips the old UI block, and appends the v2.7 UI block (DOM-anchored to chat toolbar).
-
-- **v2.1** (gate only): adds the v2.3 silence-frame mute logic and the v2.4 UI block.
-- **v2.2** (gate + early-return mute + bottom-right UI): replaces the early-return mute with v2.3's silence-frame + barge-in logic, strips the v2.2 UI block, appends the v2.4 UI block.
-- **v2.3** (gate + silence-frame mute + bottom-left UI): keeps the mute logic (it's identical), strips the v2.3 UI block, appends the v2.4 UI block (right-anchored + self-healing).
+Just re-run the script — it detects whichever earlier patch version (if any) is on the bundle, keeps the unchanged pieces, strips superseded UI blocks, and appends the current one. All upgrade paths from v2.1 → current converge on the same end state.
 
 ```bash
 ./apply-openclaw-firefox-talk-patch.sh
@@ -413,6 +409,13 @@ openclaw gateway restart
 ```
 
 After the gateway restart, **unregister the OpenClaw service worker** in Firefox (`about:debugging#/runtime/this-firefox` → find `127.0.0.1:18789/sw.js` → Unregister), then close and reopen the OpenClaw tab. Without this step, Firefox keeps serving the previous cached bundle and you won't see the new behavior.
+
+If OpenClaw itself was upgraded (e.g. `2026.5.2` → `2026.5.3`), the OpenClaw bundle files in `dist/` get replaced and the patch is gone. Re-run the apply script. Run `--dry-run` first to confirm anchors still match the new OpenClaw version before any writes:
+
+```bash
+./apply-openclaw-firefox-talk-patch.sh --dry-run    # safe check first
+./apply-openclaw-firefox-talk-patch.sh              # then apply
+```
 
 ---
 
