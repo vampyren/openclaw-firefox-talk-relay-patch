@@ -43,7 +43,7 @@ This patch forces OpenAI Start Talk through that relay path, allows the relay ev
 
 ## What the patch changes
 
-The script patches three installed OpenClaw bundles.
+The script patches four installed OpenClaw bundles.
 
 ### 1. Force OpenAI Start Talk to gateway-relay
 
@@ -120,11 +120,32 @@ A small button is inserted **inside OpenClaw's chat toolbar**, right after the e
 
 Click or press `Ctrl+M` to toggle. State persists in `localStorage["openclaw.micMuted"]`.
 
-The button auto-anchors to the right edge of the viewport (stable across sidebar collapse/expand) and self-heals via a `MutationObserver` — if React removes it during a re-render, it gets re-attached automatically. Position is tunable via four `localStorage` knobs (see below).
+The button is DOM-anchored as a sibling of the Start Talk button inside the chat toolbar, so it moves with the toolbar's flexbox layout, and self-heals via a `MutationObserver` — if React removes it during a re-render, it gets re-attached automatically. Since v2.7.3 it's only attached on chat pages (gated on `.shell--chat`); since v2.7.4 the SW cache name is bumped on each apply so re-applies don't get masked by stale SW caches.
 
 **On unmute**, the gate is reset so your voice reaches OpenAI's VAD immediately, triggering the realtime API's natural barge-in. The assistant stops generating new audio. Note that any audio already buffered in your browser will still play out as it drains — barge-in cancels generation, not local playback.
 
 This complements the automatic gate — the gate handles the common case (assistant audio queued, mic silent), the manual mute handles the edge case the gate can't fully solve (acoustic feedback from open speakers, where the assistant's own voice reaches your microphone over the air and trips OpenAI's VAD regardless of any client-side gating).
+
+### 5. Bump SW cache name so re-applied patches actually reach the browser
+
+File matched dynamically:
+
+```
+dist/control-ui/sw.js
+```
+
+Change:
+
+```diff
+-const CACHE_NAME = "openclaw-control-v1";
++const CACHE_NAME = "openclaw-control-v1-mute-v28";
+```
+
+OpenClaw's service worker is cache-first for `/assets/*.js` with a static cache name (`openclaw-control-v1`). Once an asset URL is cached, the SW serves the cached copy forever — patching the bundle on disk has no visible effect until the browser's SW cache is invalidated. Before v2.7.4 that meant manually unregistering the SW after every apply.
+
+By bumping `CACHE_NAME` to a per-IIFE-version suffix (`-mute-v28`), the SW's existing activate handler — which deletes any cache whose name doesn't match the current `CACHE_NAME` — drops the stale cache on next page load. The new cache fills cache-first from network and serves the patched bundle automatically, no manual SW unregister required.
+
+The replacement is anchored on a regex that matches both the upstream string and any prior patched value, so re-applying after a future IIFE bump (e.g. V29) cleanly bumps the cache name again.
 
 ---
 
@@ -410,7 +431,9 @@ Just re-run the script — it detects whichever earlier patch version (if any) i
 openclaw gateway restart
 ```
 
-After the gateway restart, **unregister the OpenClaw service worker** in Firefox (`about:debugging#/runtime/this-firefox` → find `127.0.0.1:18789/sw.js` → Unregister), then close and reopen the OpenClaw tab. Without this step, Firefox keeps serving the previous cached bundle and you won't see the new behavior.
+After the gateway restart, hard-refresh the OpenClaw tab (`Ctrl+Shift+R`) once or twice. Since v2.7.4 the apply script also bumps OpenClaw's service-worker cache name, which triggers the SW's activate-handler to delete the stale cache on next page load — so the patched bundle is served automatically without needing to manually unregister the service worker.
+
+(For older v2.7.3-and-earlier upgrades that didn't bump the cache name, you also had to **unregister the OpenClaw service worker** in Firefox at `about:debugging#/runtime/this-firefox` → find `127.0.0.1:18789/sw.js` → Unregister, then close and reopen the OpenClaw tab. v2.7.4 makes that step automatic.)
 
 If OpenClaw itself was upgraded (e.g. `2026.5.2` → `2026.5.3`), the OpenClaw bundle files in `dist/` get replaced and the patch is gone. Re-run the apply script. Run `--dry-run` first to confirm anchors still match the new OpenClaw version before any writes:
 
@@ -471,6 +494,7 @@ The script's current version is reported by `./apply-openclaw-firefox-talk-patch
 
 | Version | Highlights |
 |---|---|
+| **v2.7.4** | Patch now also bumps OpenClaw's SW cache name (`dist/control-ui/sw.js`). OpenClaw's SW is cache-first for `/assets/*.js` with a static cache name, so once a bundle URL is cached the SW served the old version forever and patches never reached the browser without a manual unregister. With the cache name bumped, the SW's existing activate-handler cleanup deletes the stale cache on next page load and the patched bundle is served cleanly. JS validation, backup, and rollback all extended to `sw.js`. |
 | **v2.7.3** | Mute button hides on non-chat pages (Agents, Channels, etc.) instead of falling back to fixed-mode floating over unrelated UI. `ensureAttached()` gates on the `.shell--chat` BEM marker; returning to chat re-attaches inline via the existing MutationObserver self-heal. |
 | **v2.7.2** | Add `--dry-run` flag for safe pre-apply check. Add post-write `node --check` validation: if any patched bundle fails to parse, all three are restored from the just-made backup and the script aborts. |
 | **v2.7.1** | Compatibility with OpenClaw 2026.5.3, which split the server-methods bundle into two files. Discovery glob now excludes the new `server-methods-list-*.js`. |
