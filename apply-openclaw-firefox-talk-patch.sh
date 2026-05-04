@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.1)
+# OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.2)
 #
 # Purpose:
 #   1. Force OpenAI Web UI Start Talk through gateway-relay instead of browser-direct WebRTC SDP.
@@ -9,7 +9,17 @@ set -euo pipefail
 #   3. Add half-duplex mic gating so the browser does not send mic audio while assistant
 #      audio is playing. Gate threshold is configurable at runtime via
 #      localStorage["openclaw.micGateMs"]  (milliseconds, default 150).
-#   4. Optionally set up OPENAI_API_KEY securely for OpenClaw SecretRef/env usage.
+#   4. Add a manual mute button + Ctrl+M shortcut for users on speakers (where acoustic
+#      feedback can defeat any automatic gate). Mute state persists across reloads in
+#      localStorage["openclaw.micMuted"].
+#   5. Optionally set up OPENAI_API_KEY securely for OpenClaw SecretRef/env usage.
+#
+# Changes in v2.2:
+#   - New mute-frame-skip injected into the relay-audio pump (reads localStorage on every
+#     frame, so toggle takes effect immediately).
+#   - New floating mute button injected into the OpenClaw UI (bottom-right, click or Ctrl+M).
+#   - Designed to layer on top of v2.1 cleanly: re-running v2.2 against a v2.1-patched bundle
+#     adds only the new pieces; re-running against an already-v2.2 bundle skips everything.
 #
 # Changes in v2.1:
 #   - Key is passed to Python via file descriptor 3 instead of an env var,
@@ -50,7 +60,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 print_help() {
     cat <<EOF
-OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.1)
+OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.2)
 
 Usage:
   $(basename "$0")                       Apply the patch.
@@ -313,8 +323,41 @@ FE_REPL = (
     'if(this.outputContext&&this.playhead>this.outputContext.currentTime+this._mgS)return;'
     r'\1'
 )
-FE_MARKER     = 'this._mgS'                    # presence -> v2 patch already applied
+FE_MARKER     = 'this._mgS'                    # presence -> gate (v2.x) already applied
 FE_V1_MARKER  = 'currentTime+.15)return;let'   # presence -> v1 patch (hardcoded gate) applied
+
+# ---- Patch 3b (v2.2): mute frame-skip in the relay-audio pump ----
+# Anchor matches BOTH unpatched and v2.1-patched bundles -- they share this prefix.
+# Re-reads localStorage every frame (cheap, lets the mute toggle take effect immediately).
+MUTE_PATTERN = re.compile(
+    r'(this\.inputProcessor\.onaudioprocess=e=>\{if\(this\.closed\)return;)'
+)
+MUTE_REPL = r'\1if(localStorage.getItem("openclaw.micMuted")==="1")return;'
+MUTE_MARKER = 'localStorage.getItem("openclaw.micMuted")==="1"'
+
+# ---- Patch 3c (v2.2): floating mute button + Ctrl+M shortcut ----
+# Appended once at end of file. Self-contained IIFE, idempotent via marker check.
+UI_MARKER = '/*__OPENCLAW_MUTE_BUTTON_V22__*/'
+UI_BLOCK = '\n;' + UI_MARKER + '''(function(){
+if(window.__openclawMuteBtn)return;
+window.__openclawMuteBtn=true;
+function init(){
+if(document.getElementById("__openclaw-mute-btn"))return;
+var btn=document.createElement("button");
+btn.id="__openclaw-mute-btn";
+btn.title="Toggle microphone (Ctrl+M)";
+Object.assign(btn.style,{position:"fixed",bottom:"16px",right:"16px",padding:"10px 16px",border:"none",borderRadius:"8px",cursor:"pointer",fontSize:"13px",fontWeight:"600",fontFamily:"system-ui,sans-serif",letterSpacing:"0.5px",zIndex:"2147483647",boxShadow:"0 2px 8px rgba(0,0,0,0.4)",color:"#fff",userSelect:"none"});
+function render(){var m=localStorage.getItem("openclaw.micMuted")==="1";btn.style.backgroundColor=m?"#dc2626":"#10b981";btn.textContent=m?"MIC MUTED":"MIC ON";btn.setAttribute("aria-pressed",String(m));}
+function toggle(){var m=localStorage.getItem("openclaw.micMuted")==="1";if(m)localStorage.removeItem("openclaw.micMuted");else localStorage.setItem("openclaw.micMuted","1");render();}
+btn.addEventListener("click",toggle);
+document.addEventListener("keydown",function(e){if(e.ctrlKey&&!e.shiftKey&&!e.altKey&&!e.metaKey&&(e.key==="m"||e.key==="M")){e.preventDefault();toggle();}});
+document.body.appendChild(btn);
+render();
+}
+if(document.readyState!=="loading")init();
+else document.addEventListener("DOMContentLoaded",init);
+})();
+'''
 
 def patch_literal(path, old, new, label):
     text = path.read_text()
@@ -329,23 +372,52 @@ def patch_literal(path, old, new, label):
 
 def patch_frontend(path):
     text = path.read_text()
-    label = 'pause mic relayAudio while assistant audio is queued/playing (configurable gate)'
-    if FE_MARKER in text:
-        print(f'SKIP already patched: {label}')
-        return
+    changed = False
+
+    # 3a: gate (v2.x)
+    gate_label = 'pause mic relayAudio while assistant audio is queued/playing (configurable gate)'
     if FE_V1_MARKER in text:
         sys.exit(
-            f'ABORT: {label}: detected v1 patch (hardcoded 150 ms gate). '
+            f'ABORT: {gate_label}: detected v1 patch (hardcoded 150 ms gate). '
             f'Run --rollback latest first, then re-apply for the configurable gate.'
         )
-    matches = FE_PATTERN.findall(text)
-    if len(matches) != 1:
-        sys.exit(
-            f'ABORT: {label}: expected exactly 1 regex match in {path.name}, found {len(matches)}'
-        )
-    new_text = FE_PATTERN.sub(FE_REPL, text, count=1)
-    path.write_text(new_text)
-    print(f'PATCH_OK: {label}')
+    if FE_MARKER in text:
+        print(f'SKIP already patched: {gate_label}')
+    else:
+        matches = FE_PATTERN.findall(text)
+        if len(matches) != 1:
+            sys.exit(
+                f'ABORT: {gate_label}: expected exactly 1 regex match in {path.name}, found {len(matches)}'
+            )
+        text = FE_PATTERN.sub(FE_REPL, text, count=1)
+        changed = True
+        print(f'PATCH_OK: {gate_label}')
+
+    # 3b: mute frame-skip (v2.2)
+    mute_label = 'mute frame-skip in mic relay pump (v2.2)'
+    if MUTE_MARKER in text:
+        print(f'SKIP already patched: {mute_label}')
+    else:
+        matches = MUTE_PATTERN.findall(text)
+        if len(matches) != 1:
+            sys.exit(
+                f'ABORT: {mute_label}: expected exactly 1 regex match in {path.name}, found {len(matches)}'
+            )
+        text = MUTE_PATTERN.sub(MUTE_REPL, text, count=1)
+        changed = True
+        print(f'PATCH_OK: {mute_label}')
+
+    # 3c: UI bootstrap (v2.2)
+    ui_label = 'inject mute button + Ctrl+M shortcut (v2.2)'
+    if UI_MARKER in text:
+        print(f'SKIP already patched: {ui_label}')
+    else:
+        text = text + UI_BLOCK
+        changed = True
+        print(f'PATCH_OK: {ui_label}')
+
+    if changed:
+        path.write_text(text)
 
 patch_literal(server_methods, SM_OLD, SM_NEW,
               'force OpenAI talk.realtime.session to gateway-relay')
@@ -377,6 +449,12 @@ PY
 
     echo
     echo "PATCH_DONE"
+    echo
+    echo "Mute button (v2.2):"
+    echo "  A floating MIC ON / MIC MUTED button appears bottom-right of the OpenClaw UI."
+    echo "  Click it or press Ctrl+M to toggle. State persists across reloads via"
+    echo "  localStorage[\"openclaw.micMuted\"]. Useful when speakers are causing self-"
+    echo "  interruption that the automatic gate can't fully prevent."
     echo
     echo "Tune the mic gate (browser DevTools console on the OpenClaw page):"
     echo "  localStorage.setItem('openclaw.micGateMs', '250')   // stricter no-echo"

@@ -111,6 +111,19 @@ Why a gate at all: without it, your mic picks up the assistant's own voice from 
 
 The frontend anchor uses a regex that locks on the **structural shape** of the `onaudioprocess` arrow plus the **semantic** string `` `talk.realtime.relayAudio` ``. Helper functions (`lG`, `sG`, ...) can be renamed by the minifier across rebuilds without breaking the anchor.
 
+### 4. Manual mute button + Ctrl+M shortcut (v2.2)
+
+A small floating button is injected into the bottom-right of the OpenClaw UI:
+
+- **MIC ON** (green) — relay pump sends mic audio normally.
+- **MIC MUTED** (red) — relay pump drops every mic frame.
+
+Click or press `Ctrl+M` to toggle. State persists in `localStorage["openclaw.micMuted"]`.
+
+This complements the automatic gate — the gate handles the common case (assistant audio queued, mic silent), the manual mute handles the edge case the gate can't fully solve (acoustic feedback from open speakers, where the assistant's own voice reaches your microphone over the air and trips OpenAI's VAD regardless of any client-side gating).
+
+The button is always visible (across the OpenClaw UI), but only has an effect during an active Talk session — when no Talk is running, the mute flag is just an unread localStorage entry.
+
 ---
 
 ## Requirements
@@ -202,6 +215,30 @@ Rough guidance:
 | Headphones, no acoustic loop | 60–100 |
 | Quiet room, near-field speakers | 150 (default) |
 | Open speakers in a small/echoey room | 250–400 |
+
+---
+
+## Manual mute button (v2.2)
+
+The patch injects a small floating button into the OpenClaw UI (bottom-right corner) that toggles the microphone:
+
+- **MIC ON** (green) — relay pump sends mic audio normally.
+- **MIC MUTED** (red) — relay pump drops every mic frame until you toggle back on.
+
+Click the button or press **`Ctrl+M`** anywhere on the page to toggle. The keyboard shortcut works whether the button has focus or not.
+
+State persists across reloads in `localStorage["openclaw.micMuted"]` (`"1"` when muted, absent when on).
+
+This is the workaround for situations where the automatic mic gate isn't enough — most commonly **using open speakers instead of headphones**, where the assistant's own voice physically reaches your microphone and trips OpenAI's VAD regardless of any client-side gating. With manual mute, you can listen to long replies without the assistant interrupting itself, then unmute when you want to speak.
+
+To toggle the mute state from the console (e.g. for scripting or testing):
+
+```js
+localStorage.setItem('openclaw.micMuted', '1')      // mute
+localStorage.removeItem('openclaw.micMuted')        // unmute
+```
+
+The relay pump re-reads `localStorage` on every audio frame, so toggling takes effect immediately — no need to restart Talk.
 
 ---
 
@@ -326,6 +363,19 @@ The migration is two commands plus a restart:
 ./apply-openclaw-firefox-talk-patch.sh
 openclaw gateway restart
 ```
+
+---
+
+## Upgrading from v2.1 to v2.2
+
+Just re-run the script. v2.2's frontend patcher detects a v2.1-patched bundle, skips the gate (already in place), and adds only the new pieces (mute frame-skip + UI bootstrap). No rollback or manual revert needed.
+
+```bash
+./apply-openclaw-firefox-talk-patch.sh
+openclaw gateway restart
+```
+
+After the gateway restart, **unregister the OpenClaw service worker** in Firefox (`about:debugging#/runtime/this-firefox` → find `127.0.0.1:18789/sw.js` → Unregister), then close and reopen the OpenClaw tab. Without this step, Firefox keeps serving the cached v2.1 bundle and you won't see the mute button.
 
 ---
 
