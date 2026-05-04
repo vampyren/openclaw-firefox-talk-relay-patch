@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.2)
+# OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.3)
 #
 # Purpose:
 #   1. Force OpenAI Web UI Start Talk through gateway-relay instead of browser-direct WebRTC SDP.
@@ -14,12 +14,20 @@ set -euo pipefail
 #      localStorage["openclaw.micMuted"].
 #   5. Optionally set up OPENAI_API_KEY securely for OpenClaw SecretRef/env usage.
 #
+# Changes in v2.3:
+#   - Mute now sends SILENCE FRAMES instead of skipping the relay call. The realtime
+#     session and the OpenClaw relay both stay healthy, the assistant keeps generating
+#     while you're muted (you just can't be heard).
+#   - Unmute now resets the gate's playhead so mic frames flow IMMEDIATELY -- voice
+#     reaches OpenAI's VAD and triggers natural barge-in. (Locally-queued assistant
+#     audio still plays out until it drains; cleanly clearing the local queue is out
+#     of scope for this patch.)
+#   - Mute button repositioned to bottom-left (next to OpenClaw's existing controls).
+#     Position is overridable via localStorage["openclaw.muteBtnLeft"] and
+#     ["openclaw.muteBtnBottom"].
+#
 # Changes in v2.2:
-#   - New mute-frame-skip injected into the relay-audio pump (reads localStorage on every
-#     frame, so toggle takes effect immediately).
-#   - New floating mute button injected into the OpenClaw UI (bottom-right, click or Ctrl+M).
-#   - Designed to layer on top of v2.1 cleanly: re-running v2.2 against a v2.1-patched bundle
-#     adds only the new pieces; re-running against an already-v2.2 bundle skips everything.
+#   - Floating mute button + Ctrl+M shortcut.
 #
 # Changes in v2.1:
 #   - Key is passed to Python via file descriptor 3 instead of an env var,
@@ -60,7 +68,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 print_help() {
     cat <<EOF
-OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.2)
+OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.3)
 
 Usage:
   $(basename "$0")                       Apply the patch.
@@ -326,19 +334,32 @@ FE_REPL = (
 FE_MARKER     = 'this._mgS'                    # presence -> gate (v2.x) already applied
 FE_V1_MARKER  = 'currentTime+.15)return;let'   # presence -> v1 patch (hardcoded gate) applied
 
-# ---- Patch 3b (v2.2): mute frame-skip in the relay-audio pump ----
+# ---- Patch 3b (v2.3): silence-frame mute + barge-in on unmute ----
 # Anchor matches BOTH unpatched and v2.1-patched bundles -- they share this prefix.
-# Re-reads localStorage every frame (cheap, lets the mute toggle take effect immediately).
+# v2.3 logic:
+#   - while muted: zero the input buffer (silence frames flow normally)
+#   - on transition mute->unmute: reset playhead so the gate doesn't suppress the next
+#     mic frames, letting voice reach OpenAI's VAD immediately to trigger barge-in
 MUTE_PATTERN = re.compile(
     r'(this\.inputProcessor\.onaudioprocess=e=>\{if\(this\.closed\)return;)'
 )
-MUTE_REPL = r'\1if(localStorage.getItem("openclaw.micMuted")==="1")return;'
-MUTE_MARKER = 'localStorage.getItem("openclaw.micMuted")==="1"'
+MUTE_INSERT = (
+    'const _m=localStorage.getItem("openclaw.micMuted")==="1";'
+    'if(_m)e.inputBuffer.getChannelData(0).fill(0);'
+    'else if(this._wasMuted&&this.outputContext)this.playhead=this.outputContext.currentTime;'
+    'this._wasMuted=_m;'
+)
+MUTE_REPL = r'\1' + MUTE_INSERT
+MUTE_MARKER_V23 = 'this._wasMuted'
+# v2.2 used a simple early-return; if we see that, we replace it with the v2.3 expression.
+MUTE_V22_TEXT = 'if(localStorage.getItem("openclaw.micMuted")==="1")return;'
 
-# ---- Patch 3c (v2.2): floating mute button + Ctrl+M shortcut ----
-# Appended once at end of file. Self-contained IIFE, idempotent via marker check.
-UI_MARKER = '/*__OPENCLAW_MUTE_BUTTON_V22__*/'
-UI_BLOCK = '\n;' + UI_MARKER + '''(function(){
+# ---- Patch 3c (v2.3): floating mute button + Ctrl+M shortcut, repositioned ----
+# Bottom-left, sized to fit alongside the existing Talk control. Position is tunable
+# at runtime via localStorage["openclaw.muteBtnLeft"] and ["openclaw.muteBtnBottom"].
+UI_MARKER_V22 = '/*__OPENCLAW_MUTE_BUTTON_V22__*/'
+UI_MARKER_V23 = '/*__OPENCLAW_MUTE_BUTTON_V23__*/'
+UI_BLOCK = '\n;' + UI_MARKER_V23 + '''(function(){
 if(window.__openclawMuteBtn)return;
 window.__openclawMuteBtn=true;
 function init(){
@@ -346,7 +367,9 @@ if(document.getElementById("__openclaw-mute-btn"))return;
 var btn=document.createElement("button");
 btn.id="__openclaw-mute-btn";
 btn.title="Toggle microphone (Ctrl+M)";
-Object.assign(btn.style,{position:"fixed",bottom:"16px",right:"16px",padding:"10px 16px",border:"none",borderRadius:"8px",cursor:"pointer",fontSize:"13px",fontWeight:"600",fontFamily:"system-ui,sans-serif",letterSpacing:"0.5px",zIndex:"2147483647",boxShadow:"0 2px 8px rgba(0,0,0,0.4)",color:"#fff",userSelect:"none"});
+var posLeft=localStorage.getItem("openclaw.muteBtnLeft")||"110px";
+var posBottom=localStorage.getItem("openclaw.muteBtnBottom")||"28px";
+Object.assign(btn.style,{position:"fixed",bottom:posBottom,left:posLeft,padding:"6px 12px",border:"none",borderRadius:"6px",cursor:"pointer",fontSize:"12px",fontWeight:"600",fontFamily:"system-ui,sans-serif",letterSpacing:"0.4px",zIndex:"2147483647",boxShadow:"0 2px 6px rgba(0,0,0,0.3)",color:"#fff",userSelect:"none",height:"32px",lineHeight:"20px"});
 function render(){var m=localStorage.getItem("openclaw.micMuted")==="1";btn.style.backgroundColor=m?"#dc2626":"#10b981";btn.textContent=m?"MIC MUTED":"MIC ON";btn.setAttribute("aria-pressed",String(m));}
 function toggle(){var m=localStorage.getItem("openclaw.micMuted")==="1";if(m)localStorage.removeItem("openclaw.micMuted");else localStorage.setItem("openclaw.micMuted","1");render();}
 btn.addEventListener("click",toggle);
@@ -393,11 +416,17 @@ def patch_frontend(path):
         changed = True
         print(f'PATCH_OK: {gate_label}')
 
-    # 3b: mute frame-skip (v2.2)
-    mute_label = 'mute frame-skip in mic relay pump (v2.2)'
-    if MUTE_MARKER in text:
+    # 3b: silence-frame mute + barge-in on unmute (v2.3)
+    mute_label = 'silence-frame mute + barge-in on unmute (v2.3)'
+    if MUTE_MARKER_V23 in text:
         print(f'SKIP already patched: {mute_label}')
+    elif MUTE_V22_TEXT in text:
+        # In-place upgrade from v2.2's early-return mute to v2.3 silence-frame mute.
+        text = text.replace(MUTE_V22_TEXT, MUTE_INSERT, 1)
+        changed = True
+        print(f'PATCH_OK: {mute_label} (upgraded from v2.2)')
     else:
+        # Fresh insert.
         matches = MUTE_PATTERN.findall(text)
         if len(matches) != 1:
             sys.exit(
@@ -407,11 +436,16 @@ def patch_frontend(path):
         changed = True
         print(f'PATCH_OK: {mute_label}')
 
-    # 3c: UI bootstrap (v2.2)
-    ui_label = 'inject mute button + Ctrl+M shortcut (v2.2)'
-    if UI_MARKER in text:
+    # 3c: UI bootstrap (v2.3 with new positioning)
+    ui_label = 'inject mute button + Ctrl+M shortcut (v2.3, bottom-left)'
+    if UI_MARKER_V23 in text:
         print(f'SKIP already patched: {ui_label}')
     else:
+        # Strip any v2.2 UI block first (we appended it at end-of-file with leading '\n;').
+        v22_start = '\n;' + UI_MARKER_V22
+        if v22_start in text:
+            text = text[:text.index(v22_start)]
+            print(f'  ... removed v2.2 UI block')
         text = text + UI_BLOCK
         changed = True
         print(f'PATCH_OK: {ui_label}')
@@ -450,11 +484,17 @@ PY
     echo
     echo "PATCH_DONE"
     echo
-    echo "Mute button (v2.2):"
-    echo "  A floating MIC ON / MIC MUTED button appears bottom-right of the OpenClaw UI."
-    echo "  Click it or press Ctrl+M to toggle. State persists across reloads via"
-    echo "  localStorage[\"openclaw.micMuted\"]. Useful when speakers are causing self-"
-    echo "  interruption that the automatic gate can't fully prevent."
+    echo "Mute button (v2.3):"
+    echo "  Floating MIC ON / MIC MUTED button at bottom-left of the OpenClaw UI."
+    echo "  Click it or press Ctrl+M to toggle. State persists in localStorage."
+    echo "  - While muted: silence frames flow normally (assistant keeps talking, you"
+    echo "    just can't be heard). Connection stays healthy."
+    echo "  - On unmute: gate is reset so your voice reaches the API immediately,"
+    echo "    triggering OpenAI's natural barge-in to stop the assistant's response."
+    echo "  Tune position via:"
+    echo "    localStorage.setItem('openclaw.muteBtnLeft',   '110px')   // default"
+    echo "    localStorage.setItem('openclaw.muteBtnBottom', '28px')    // default"
+    echo "  Then hard-refresh the page."
     echo
     echo "Tune the mic gate (browser DevTools console on the OpenClaw page):"
     echo "  localStorage.setItem('openclaw.micGateMs', '250')   // stricter no-echo"
