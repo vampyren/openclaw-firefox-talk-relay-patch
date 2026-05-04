@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.6)
+# OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.7)
 #
 # Purpose:
 #   1. Force OpenAI Web UI Start Talk through gateway-relay instead of browser-direct WebRTC SDP.
@@ -14,15 +14,18 @@ set -euo pipefail
 #      localStorage["openclaw.micMuted"].
 #   5. Optionally set up OPENAI_API_KEY securely for OpenClaw SecretRef/env usage.
 #
+# Changes in v2.7:
+#   - Bugfix: when the IIFE ran before React had mounted the chat toolbar, v2.6 fell
+#     back to fixed positioning and then the MutationObserver's fast-path early-return
+#     prevented it from upgrading to inline-mode once the toolbar appeared. v2.7 tracks
+#     attach-mode separately and always re-checks for the toolbar while in fixed-mode,
+#     so it transitions to inline as soon as the toolbar exists.
+#   - Defensive cleanup at init: removes any pre-existing button with our id before
+#     attaching, in case of leftover state from prior IIFE runs.
+#
 # Changes in v2.6:
-#   - Mute button is now DOM-anchored: inserted as a sibling INSIDE the
-#     .agent-chat__toolbar-left container, right after the Start Talk button. The
-#     button moves with OpenClaw's layout naturally (flexbox flow), so it stays in
-#     the right place across viewport resizes, sidebar collapses, and display swaps.
-#   - Falls back to fixed positioning with the v2.5 defaults / knobs only if the
-#     toolbar can't be found (e.g., OpenClaw layout changes in a future version).
-#   - MutationObserver now uses requestAnimationFrame to batch DOM-change reactions
-#     into one check per frame instead of firing per individual mutation.
+#   - Mute button DOM-anchored to .agent-chat__toolbar-left (no fixed pixel coords).
+#   - rAF batching for MutationObserver callbacks.
 #
 # Changes in v2.5:
 #   - Default fallback button position changed to left:399px top:843px.
@@ -78,7 +81,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 print_help() {
     cat <<EOF
-OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.6)
+OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.7)
 
 Usage:
   $(basename "$0")                       Apply the patch.
@@ -364,23 +367,25 @@ MUTE_MARKER_V23 = 'this._wasMuted'
 # v2.2 used a simple early-return; if we see that, we replace it with the v2.3 expression.
 MUTE_V22_TEXT = 'if(localStorage.getItem("openclaw.micMuted")==="1")return;'
 
-# ---- Patch 3c (v2.6): floating mute button + Ctrl+M shortcut, DOM-anchored ----
-# Tries to insert the mute button as a sibling INSIDE OpenClaw's chat toolbar
-# (.agent-chat__toolbar-left), right after the "Start Talk" button. This makes
-# the mute button move naturally with the toolbar's flexbox layout, so it stays
-# in the right place across viewport resizes and sidebar collapses.
-# If the toolbar selector ever changes (future OpenClaw update), falls back to
-# fixed positioning with the v2.5 defaults / four position knobs.
+# ---- Patch 3c (v2.7): floating mute button + Ctrl+M shortcut, DOM-anchored ----
+# Inserts the mute button as a sibling INSIDE OpenClaw's chat toolbar
+# (.agent-chat__toolbar-left), right after the "Start Talk" button.
+# v2.7 fix: previous v2.6 had a state-machine bug where if the IIFE ran before
+# React mounted the toolbar, the button got stuck in fallback fixed-mode and never
+# upgraded to inline-mode when the toolbar appeared. v2.7 tracks attach-mode and
+# always re-checks for the toolbar while in fixed-mode.
 UI_MARKER_V22 = '/*__OPENCLAW_MUTE_BUTTON_V22__*/'
 UI_MARKER_V23 = '/*__OPENCLAW_MUTE_BUTTON_V23__*/'
 UI_MARKER_V24 = '/*__OPENCLAW_MUTE_BUTTON_V24__*/'
 UI_MARKER_V25 = '/*__OPENCLAW_MUTE_BUTTON_V25__*/'
 UI_MARKER_V26 = '/*__OPENCLAW_MUTE_BUTTON_V26__*/'
-UI_BLOCK = '\n;' + UI_MARKER_V26 + '''(function(){
+UI_MARKER_V27 = '/*__OPENCLAW_MUTE_BUTTON_V27__*/'
+UI_BLOCK = '\n;' + UI_MARKER_V27 + '''(function(){
 if(window.__openclawMuteBtn)return;
 window.__openclawMuteBtn=true;
 var btn=null;
 var attachTarget=null;
+var attachMode=null;
 var pending=false;
 function findInsertionPoint(){
 var talkBtn=document.querySelector('button[aria-label="Start Talk"]');
@@ -413,23 +418,38 @@ function render(){if(!btn)return;var m=localStorage.getItem("openclaw.micMuted")
 function toggle(){var m=localStorage.getItem("openclaw.micMuted")==="1";if(m)localStorage.removeItem("openclaw.micMuted");else localStorage.setItem("openclaw.micMuted","1");render();}
 function ensureAttached(){
 if(!document.body)return;
-if(btn&&attachTarget&&attachTarget.contains(btn)&&document.body.contains(attachTarget))return;
+// Fast-return ONLY if inline-mode and stable. Fixed-mode always re-checks
+// because we want to upgrade to inline as soon as the toolbar appears.
+if(attachMode==="inline"&&btn&&attachTarget&&attachTarget.contains(btn)&&document.body.contains(attachTarget))return;
+var ip=findInsertionPoint();
+// Fast-return if no toolbar AND already fixed-attached: nothing to upgrade to.
+if(!ip&&attachMode==="fixed"&&btn&&document.body.contains(btn))return;
+// (Re)attach.
 if(btn&&btn.parentElement)btn.parentElement.removeChild(btn);
 btn=null;
-var ip=findInsertionPoint();
-btn=build(ip?"inline":"fixed");
 if(ip){
+btn=build("inline");
 if(ip.after)ip.after.parentNode.insertBefore(btn,ip.after.nextSibling);
 else ip.container.appendChild(btn);
 attachTarget=ip.container;
+attachMode="inline";
 }else{
+btn=build("fixed");
 document.body.appendChild(btn);
 attachTarget=document.body;
+attachMode="fixed";
 }
 render();
 }
 function scheduleCheck(){if(pending)return;pending=true;requestAnimationFrame(function(){pending=false;ensureAttached();});}
-function init(){if(!document.body){setTimeout(init,100);return;}ensureAttached();try{var obs=new MutationObserver(scheduleCheck);obs.observe(document.body,{childList:true,subtree:true});}catch(_){}}
+function init(){
+if(!document.body){setTimeout(init,100);return;}
+// Defensive: remove any leftover button with our id from prior IIFE state.
+var stale=document.getElementById("__openclaw-mute-btn");
+if(stale&&stale.parentElement)stale.parentElement.removeChild(stale);
+ensureAttached();
+try{var obs=new MutationObserver(scheduleCheck);obs.observe(document.body,{childList:true,subtree:true});}catch(_){}
+}
 document.addEventListener("keydown",function(e){if(e.ctrlKey&&!e.shiftKey&&!e.altKey&&!e.metaKey&&(e.key==="m"||e.key==="M")){e.preventDefault();toggle();}});
 if(document.readyState!=="loading")init();
 else document.addEventListener("DOMContentLoaded",init);
@@ -490,13 +510,14 @@ def patch_frontend(path):
         changed = True
         print(f'PATCH_OK: {mute_label}')
 
-    # 3c: UI bootstrap (v2.6 DOM-anchored to chat toolbar)
-    ui_label = 'inject mute button + Ctrl+M shortcut (v2.6, DOM-anchored)'
-    if UI_MARKER_V26 in text:
+    # 3c: UI bootstrap (v2.7 with fixed-mode upgrade-to-inline state machine)
+    ui_label = 'inject mute button + Ctrl+M shortcut (v2.7, DOM-anchored)'
+    if UI_MARKER_V27 in text:
         print(f'SKIP already patched: {ui_label}')
     else:
         # Strip any earlier UI block (we appended each at end-of-file with leading '\n;').
         for older_marker, name in (
+            (UI_MARKER_V26, 'v2.6'),
             (UI_MARKER_V25, 'v2.5'),
             (UI_MARKER_V24, 'v2.4'),
             (UI_MARKER_V23, 'v2.3'),
