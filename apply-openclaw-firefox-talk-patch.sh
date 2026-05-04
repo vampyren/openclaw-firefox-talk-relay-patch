@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.7)
+# OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.7.1)
 #
 # Purpose:
 #   1. Force OpenAI Web UI Start Talk through gateway-relay instead of browser-direct WebRTC SDP.
@@ -13,6 +13,12 @@ set -euo pipefail
 #      feedback can defeat any automatic gate). Mute state persists across reloads in
 #      localStorage["openclaw.micMuted"].
 #   5. Optionally set up OPENAI_API_KEY securely for OpenClaw SecretRef/env usage.
+#
+# Changes in v2.7.1:
+#   - Compatibility with OpenClaw 2026.5.3, which split server-methods bundle into two
+#     files (the original server-methods-*.js plus a new server-methods-list-*.js).
+#     The discovery glob now excludes the -list- variant so we patch the right file.
+#     The patch anchor itself is unchanged and still matches.
 #
 # Changes in v2.7:
 #   - Bugfix: when the IIFE ran before React had mounted the chat toolbar, v2.6 fell
@@ -47,7 +53,7 @@ set -euo pipefail
 #     so it is no longer visible in /proc/<pid>/environ during the python process.
 #   - Reject extra positional arguments (e.g. "./script.sh --setup-openai-key garbage").
 #
-# Tested against: OpenClaw 2026.5.2
+# Tested against: OpenClaw 2026.5.2, 2026.5.3
 #
 # Usage:
 #   ./apply-openclaw-firefox-talk-patch.sh
@@ -81,7 +87,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 print_help() {
     cat <<EOF
-OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.7)
+OpenClaw Firefox Start Talk gateway-relay patch (hardened v2.7.1)
 
 Usage:
   $(basename "$0")                       Apply the patch.
@@ -147,7 +153,10 @@ find_one() {
 }
 
 find_bundles() {
-    SERVER_METHODS="$(find_one 'server-methods bundle' "$DIST" -maxdepth 1 -type f -name 'server-methods-*.js')"
+    # OpenClaw 2026.5.3 introduced a separate server-methods-list-*.js (just a
+    # method-name registry, not the bundle we patch). Exclude it explicitly so
+    # discovery still resolves to exactly one server-methods bundle.
+    SERVER_METHODS="$(find_one 'server-methods bundle' "$DIST" -maxdepth 1 -type f -name 'server-methods-*.js' -not -name 'server-methods-list-*.js')"
     SERVER_IMPL="$(find_one 'server.impl bundle' "$DIST" -maxdepth 1 -type f -name 'server.impl-*.js')"
     FRONTEND="$(find_one 'control-ui index bundle' "$DIST/control-ui/assets" -maxdepth 1 -type f -name 'index-*.js')"
 }

@@ -5,7 +5,7 @@ Patch helper for OpenClaw Web UI **Start Talk** in Firefox.
 Tested on:
 
 ```
-OpenClaw 2026.5.2 (8b2a6e5)
+OpenClaw 2026.5.2 (8b2a6e5) and 2026.5.3
 Ubuntu VM on Proxmox
 Firefox 150
 OpenAI realtime model: gpt-realtime-1.5
