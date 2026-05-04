@@ -231,11 +231,11 @@ Click the button or press **`Ctrl+M`** anywhere on the page to toggle. The keybo
 
 State persists across reloads in `localStorage["openclaw.micMuted"]` (`"1"` when muted, absent when on).
 
-### Self-healing (v2.4)
+### Self-healing
 
-The button is created via an IIFE appended to the bundle. OpenClaw's React app sometimes replaces `document.body`'s children when it re-renders, which removes any externally-injected DOM. v2.4 watches for this with a `MutationObserver` on `document.body` and re-attaches the button whenever it detects the removal. From the user's perspective, the button stays put across page refreshes and React re-renders — no need to unregister the service worker just to make it reappear.
+The button is created via an IIFE appended to the bundle. OpenClaw's React app sometimes replaces `document.body`'s children when it re-renders, which removes any externally-injected DOM. The patch watches for this with a `MutationObserver` on `document.body` and re-attaches the button whenever it detects the removal. From the user's perspective, the button stays put across page refreshes and React re-renders — no need to unregister the service worker just to make it reappear.
 
-### Barge-in on unmute (v2.3+)
+### Barge-in on unmute
 
 When you toggle from MUTED back to ON during the assistant's reply, the gate's `playhead` is reset so the next mic frames flow immediately to OpenAI's realtime API. The API's VAD detects your voice and issues a barge-in event, which causes the assistant to stop generating new audio.
 
@@ -247,7 +247,7 @@ In practice the flow is: mute → listen → unmute and start speaking → assis
 
 The button is **DOM-anchored** to OpenClaw's chat toolbar — it inserts as a sibling inside `.agent-chat__toolbar-left`, right after the Start Talk button. Position adjusts automatically with the toolbar's layout. No pixel coordinates needed.
 
-If OpenClaw's toolbar selectors ever change in a future version (the patch looks for `button[aria-label="Start Talk"]` first, then falls back to `.agent-chat__toolbar-left`), the button falls back to fixed positioning at `left: 399px; top: 843px`. The four position knobs from v2.4 still work as overrides for that fallback:
+If OpenClaw's toolbar selectors ever change in a future version (the patch looks for `button[aria-label="Start Talk"]` first, then falls back to `.agent-chat__toolbar-left`), the button falls back to fixed positioning at `left: 399px; top: 843px`. Four position knobs work as overrides for that fallback:
 
 ```js
 // Only used when DOM anchoring fails (toolbar selector changed)
@@ -257,7 +257,7 @@ localStorage.setItem('openclaw.muteBtnRight',  '<px>')   // overrides Left defau
 localStorage.setItem('openclaw.muteBtnBottom', '<px>')   // overrides Top default
 ```
 
-To clear stale fallback overrides (e.g. after upgrading from v2.5 where you had dragged the button):
+To clear stale fallback overrides (e.g. if you previously dragged the button to a fixed position):
 
 ```js
 ['muteBtnLeft','muteBtnRight','muteBtnTop','muteBtnBottom']
@@ -401,7 +401,7 @@ openclaw gateway restart
 
 ## Upgrading
 
-Just re-run the script — it detects whichever earlier patch version (if any) is on the bundle, keeps the unchanged pieces, strips superseded UI blocks, and appends the current one. All upgrade paths from v2.1 → current converge on the same end state.
+Just re-run the script — it detects whichever earlier patch version (if any) is on the bundle, keeps the unchanged pieces, strips superseded UI blocks, and appends the current one. All upgrade paths converge on the same end state.
 
 ```bash
 ./apply-openclaw-firefox-talk-patch.sh
@@ -460,3 +460,23 @@ Environment variables:
 |---|---|---|
 | `OPENCLAW_ROOT` | (autodetect) | Override OpenClaw install path |
 | `KEEP_BACKUPS`  | `10`         | Backups to retain after auto-prune |
+
+---
+
+## Changelog
+
+The script's current version is reported by `./apply-openclaw-firefox-talk-patch.sh --help` (first line). Versions in this changelog are listed newest first.
+
+| Version | Highlights |
+|---|---|
+| **v2.7.2** | Add `--dry-run` flag for safe pre-apply check. Add post-write `node --check` validation: if any patched bundle fails to parse, all three are restored from the just-made backup and the script aborts. |
+| **v2.7.1** | Compatibility with OpenClaw 2026.5.3, which split the server-methods bundle into two files. Discovery glob now excludes the new `server-methods-list-*.js`. |
+| **v2.7** | Fix a state-machine bug where the mute button got stuck in fallback fixed-positioning if the IIFE ran before React mounted the toolbar. Now upgrades fixed → inline as soon as the toolbar appears. |
+| **v2.6** | Mute button is DOM-anchored to OpenClaw's chat toolbar (`.agent-chat__toolbar-left`), inserted as a sibling right after the Start Talk button. No fixed pixel coordinates needed; moves with the layout. |
+| **v2.5** | Default fallback button position changed to `left: 399px; top: 843px` for the rare case DOM anchoring fails. |
+| **v2.4** | MutationObserver-based self-healing: the button is re-attached if React removes it during a re-render. Four runtime position knobs (`muteBtnLeft/Right/Top/Bottom`) for the fallback path. |
+| **v2.3** | Mute now sends silence frames (zero-fill) instead of skipping the relay call, keeping the realtime session healthy. Unmute resets the gate so voice reaches the API immediately, triggering OpenAI's natural barge-in. |
+| **v2.2** | Floating mute button + Ctrl+M shortcut. Mute state persists in `localStorage["openclaw.micMuted"]`. |
+| **v2.1** | OpenAI key is passed to Python via file descriptor 3, not argv and not an environment variable — invisible in `ps` and in `/proc/<pid>/environ`. Strict argument validation (extra positional args rejected). |
+| **v2** | Configurable mic gate via `localStorage["openclaw.micGateMs"]`. Regex-based frontend anchor that survives minifier renames. Backup auto-pruning. |
+| **v1** | Initial: gateway-relay forcing + scope-guard fix + hardcoded 150ms gate. Run `--rollback latest` first if migrating to v2+. |
