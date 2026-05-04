@@ -222,7 +222,7 @@ Rough guidance:
 
 ## Manual mute button
 
-The patch injects a button into OpenClaw's chat toolbar (`.agent-chat__toolbar-left`), as a sibling immediately after the Start Talk button. It flows in the toolbar's flexbox layout — moves with the layout naturally, no fixed pixel coords needed. Toggle the microphone:
+The patch injects a button into OpenClaw's chat toolbar (`.agent-chat__toolbar-left`), as a sibling immediately after the Start Talk button. It flows in the toolbar's flexbox layout — moves with the layout naturally, no fixed pixel coords needed. The button is shown **only on chat pages**; when you navigate to Agents, Channels, or any other non-chat page it is detached from the DOM, and re-attached automatically when you return to a chat page. Toggle the microphone:
 
 - **MIC ON** (green) — relay pump sends mic audio normally.
 - **MIC MUTED** (red) — relay pump replaces every mic frame with silence (zero-fill of the input buffer). The realtime session and the OpenClaw relay both stay healthy; the assistant keeps generating audio while you're muted.
@@ -234,6 +234,8 @@ State persists across reloads in `localStorage["openclaw.micMuted"]` (`"1"` when
 ### Self-healing
 
 The button is created via an IIFE appended to the bundle. OpenClaw's React app sometimes replaces `document.body`'s children when it re-renders, which removes any externally-injected DOM. The patch watches for this with a `MutationObserver` on `document.body` and re-attaches the button whenever it detects the removal. From the user's perspective, the button stays put across page refreshes and React re-renders — no need to unregister the service worker just to make it reappear.
+
+The same observer handles chat ↔ non-chat navigation: when the `.shell--chat` BEM marker disappears from the DOM (you've left the chat view), the button is detached; when it reappears, the button is re-attached inline in the toolbar.
 
 ### Barge-in on unmute
 
@@ -247,7 +249,7 @@ In practice the flow is: mute → listen → unmute and start speaking → assis
 
 The button is **DOM-anchored** to OpenClaw's chat toolbar — it inserts as a sibling inside `.agent-chat__toolbar-left`, right after the Start Talk button. Position adjusts automatically with the toolbar's layout. No pixel coordinates needed.
 
-If OpenClaw's toolbar selectors ever change in a future version (the patch looks for `button[aria-label="Start Talk"]` first, then falls back to `.agent-chat__toolbar-left`), the button falls back to fixed positioning at `left: 399px; top: 843px`. Four position knobs work as overrides for that fallback:
+If OpenClaw's toolbar selectors ever change in a future version (the patch looks for `button[aria-label="Start Talk"]` first, then falls back to `.agent-chat__toolbar-left`) **but the chat shell `.shell--chat` is still present**, the button falls back to fixed positioning at `left: 399px; top: 843px`. This preserves the original "Talk works even if the toolbar got renamed" intent without leaking onto non-chat pages — fixed-mode now requires the chat shell to be present. Four position knobs work as overrides for that fallback:
 
 ```js
 // Only used when DOM anchoring fails (toolbar selector changed)
@@ -469,6 +471,7 @@ The script's current version is reported by `./apply-openclaw-firefox-talk-patch
 
 | Version | Highlights |
 |---|---|
+| **v2.7.3** | Mute button hides on non-chat pages (Agents, Channels, etc.) instead of falling back to fixed-mode floating over unrelated UI. `ensureAttached()` gates on the `.shell--chat` BEM marker; returning to chat re-attaches inline via the existing MutationObserver self-heal. |
 | **v2.7.2** | Add `--dry-run` flag for safe pre-apply check. Add post-write `node --check` validation: if any patched bundle fails to parse, all three are restored from the just-made backup and the script aborts. |
 | **v2.7.1** | Compatibility with OpenClaw 2026.5.3, which split the server-methods bundle into two files. Discovery glob now excludes the new `server-methods-list-*.js`. |
 | **v2.7** | Fix a state-machine bug where the mute button got stuck in fallback fixed-positioning if the IIFE ran before React mounted the toolbar. Now upgrades fixed → inline as soon as the toolbar appears. |
